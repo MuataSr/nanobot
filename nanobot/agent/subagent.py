@@ -2,7 +2,9 @@
 
 import asyncio
 import json
+import time
 import uuid
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
@@ -23,12 +25,29 @@ from nanobot.config.schema import ExecToolConfig, WebToolsConfig
 from nanobot.providers.base import LLMProvider
 
 
-class _SubagentHook(AgentHook):
-    """Logging-only hook for subagent execution."""
+@dataclass(slots=True)
+class SubagentStatus:
+    """Real-time status of a running subagent."""
 
-    def __init__(self, task_id: str) -> None:
+    task_id: str
+    label: str
+    task_description: str
+    started_at: float          # time.monotonic()
+    phase: str = "initializing"  # initializing | awaiting_tools | tools_completed | final_response | done | error
+    iteration: int = 0
+    tool_events: list = field(default_factory=list)   # [{name, status, detail}, ...]
+    usage: dict = field(default_factory=dict)          # token usage
+    stop_reason: str | None = None
+    error: str | None = None
+
+
+class _SubagentHook(AgentHook):
+    """Hook for subagent execution — logs tool calls and updates status."""
+
+    def __init__(self, task_id: str, status: SubagentStatus | None = None) -> None:
         super().__init__()
         self._task_id = task_id
+        self._status = status
 
     async def before_execute_tools(self, context: AgentHookContext) -> None:
         for tool_call in context.tool_calls:
@@ -37,6 +56,15 @@ class _SubagentHook(AgentHook):
                 "Subagent [{}] executing: {} with arguments: {}",
                 self._task_id, tool_call.name, args_str,
             )
+
+    async def after_iteration(self, context: AgentHookContext) -> None:
+        if self._status is None:
+            return
+        self._status.iteration = context.iteration
+        self._status.tool_events = list(context.tool_events)
+        self._status.usage = dict(context.usage)
+        if context.error:
+            self._status.error = str(context.error)
 
 
 class SubagentManager:
@@ -54,8 +82,6 @@ class SubagentManager:
         restrict_to_workspace: bool = False,
         disabled_skills: list[str] | None = None,
     ):
-        from nanobot.config.schema import ExecToolConfig
-
         self.provider = provider
         self.workspace = workspace
         self.bus = bus
@@ -67,6 +93,7 @@ class SubagentManager:
         self.disabled_skills = set(disabled_skills or [])
         self.runner = AgentRunner(provider)
         self._running_tasks: dict[str, asyncio.Task[None]] = {}
+        self._task_statuses: dict[str, SubagentStatus] = {}
         self._session_tasks: dict[str, set[str]] = {}  # session_key -> {task_id, ...}
 
     async def spawn(
@@ -76,14 +103,30 @@ class SubagentManager:
         origin_channel: str = "cli",
         origin_chat_id: str = "direct",
         session_key: str | None = None,
+        max_iterations: int = 15,
+        timeout_seconds: int = 300,
+        expected_files: list[str] | None = None,
     ) -> str:
         """Spawn a subagent to execute a task in the background."""
         task_id = str(uuid.uuid4())[:8]
         display_label = label or task[:30] + ("..." if len(task) > 30 else "")
         origin = {"channel": origin_channel, "chat_id": origin_chat_id}
 
+        status = SubagentStatus(
+            task_id=task_id,
+            label=display_label,
+            task_description=task,
+            started_at=time.monotonic(),
+        )
+        self._task_statuses[task_id] = status
+
         bg_task = asyncio.create_task(
-            self._run_subagent(task_id, task, display_label, origin)
+            self._run_subagent(
+                task_id, task, display_label, origin, status,
+                max_iterations=max_iterations,
+                timeout_seconds=timeout_seconds,
+                expected_files=expected_files,
+            )
         )
         self._running_tasks[task_id] = bg_task
         if session_key:
@@ -91,6 +134,7 @@ class SubagentManager:
 
         def _cleanup(_: asyncio.Task) -> None:
             self._running_tasks.pop(task_id, None)
+            self._task_statuses.pop(task_id, None)
             if session_key and (ids := self._session_tasks.get(session_key)):
                 ids.discard(task_id)
                 if not ids:
@@ -107,9 +151,17 @@ class SubagentManager:
         task: str,
         label: str,
         origin: dict[str, str],
+        status: SubagentStatus,
+        max_iterations: int = 15,
+        timeout_seconds: int = 300,
+        expected_files: list[str] | None = None,
     ) -> None:
         """Execute the subagent task and announce the result."""
         logger.info("Subagent [{}] starting task: {}", task_id, label)
+
+        async def _on_checkpoint(payload: dict) -> None:
+            status.phase = payload.get("phase", status.phase)
+            status.iteration = payload.get("iteration", status.iteration)
 
         try:
             # Build subagent tools (no message tool, no spawn tool)
@@ -139,46 +191,72 @@ class SubagentManager:
                 {"role": "user", "content": task},
             ]
 
-            result = await self.runner.run(AgentRunSpec(
-                initial_messages=messages,
-                tools=tools,
-                model=self.model,
-                max_iterations=15,
-                max_tool_result_chars=self.max_tool_result_chars,
-                hook=_SubagentHook(task_id),
-                max_iterations_message="Task completed but no final response was generated.",
-                error_message=None,
-                fail_on_tool_error=True,
-            ))
-            if result.stop_reason == "tool_error":
-                await self._announce_result(
-                    task_id,
-                    label,
-                    task,
-                    self._format_partial_progress(result),
-                    origin,
-                    "error",
-                )
-                return
-            if result.stop_reason == "error":
-                await self._announce_result(
-                    task_id,
-                    label,
-                    task,
-                    result.error or "Error: subagent execution failed.",
-                    origin,
-                    "error",
-                )
-                return
-            final_result = result.final_content or "Task completed but no final response was generated."
+            result = await asyncio.wait_for(
+                self.runner.run(AgentRunSpec(
+                    initial_messages=messages,
+                    tools=tools,
+                    model=self.model,
+                    max_iterations=max_iterations,
+                    max_tool_result_chars=self.max_tool_result_chars,
+                    hook=_SubagentHook(task_id, status),
+                    max_iterations_message="Task completed but no final response was generated.",
+                    error_message=None,
+                    fail_on_tool_error=True,
+                    checkpoint_callback=_on_checkpoint,
+                )),
+                timeout=timeout_seconds,
+            )
+            status.phase = "done"
+            status.stop_reason = result.stop_reason
 
-            logger.info("Subagent [{}] completed successfully", task_id)
-            await self._announce_result(task_id, label, task, final_result, origin, "ok")
+            # Verify expected files were created
+            if expected_files:
+                missing = [f for f in expected_files if not Path(self.workspace, f).exists()]
+                if missing:
+                    warning = f"Warning: expected files not created: {', '.join(missing)}"
+                    logger.warning("Subagent [{}] {}", task_id, warning)
+                    if result.final_content:
+                        result = AgentRunResult(
+                            final_content=result.final_content + "\n\n" + warning,
+                            stop_reason=result.stop_reason,
+                            tool_events=result.tool_events,
+                            usage=result.usage,
+                            error=result.error,
+                        )
+
+            if result.stop_reason == "tool_error":
+                status.tool_events = list(result.tool_events)
+                await self._announce_result(
+                    task_id, label, task,
+                    self._format_partial_progress(result),
+                    origin, "error",
+                )
+            elif result.stop_reason == "error":
+                await self._announce_result(
+                    task_id, label, task,
+                    result.error or "Error: subagent execution failed.",
+                    origin, "error",
+                )
+            else:
+                final_result = result.final_content or "Task completed but no final response was generated."
+                logger.info("Subagent [{}] completed successfully", task_id)
+                await self._announce_result(task_id, label, task, final_result, origin, "ok")
+
+        except asyncio.TimeoutError:
+            status.phase = "error"
+            status.error = f"Timed out after {timeout_seconds}s"
+            logger.warning("Subagent [{}] timed out after {}s", task_id, timeout_seconds)
+            await self._announce_result(
+                task_id, label, task,
+                f"Error: subagent timed out after {timeout_seconds}s.",
+                origin, "error",
+            )
 
         except Exception as e:
-            error_msg = f"Error: {str(e)}"
+            status.phase = "error"
+            status.error = str(e)
             logger.error("Subagent [{}] failed: {}", task_id, e)
-            await self._announce_result(task_id, label, task, error_msg, origin, "error")
+            await self._announce_result(task_id, label, task, f"Error: {e}", origin, "error")
 
     async def _announce_result(
         self,
@@ -270,3 +348,53 @@ class SubagentManager:
             1 for tid in tids
             if tid in self._running_tasks and not self._running_tasks[tid].done()
         )
+
+    def get_status_summary(self, task_id: str | None = None) -> str:
+        """Return a human-readable summary of subagent status(es)."""
+        if task_id:
+            status = self._task_statuses.get(task_id)
+            if not status:
+                return f"No subagent found with id: {task_id}"
+            elapsed = time.monotonic() - status.started_at
+            return (
+                f"Task: {status.label}\n"
+                f"ID: {status.task_id}\n"
+                f"Status: {status.phase}\n"
+                f"Elapsed: {elapsed:.0f}s\n"
+                f"Iteration: {status.iteration}\n"
+                f"Stop reason: {status.stop_reason or 'N/A'}\n"
+                f"Error: {status.error or 'None'}"
+            )
+
+        # List all tasks
+        if not self._task_statuses and not self._running_tasks:
+            return "No subagents running or completed."
+
+        lines = []
+        for tid, status in self._task_statuses.items():
+            elapsed = time.monotonic() - status.started_at
+            is_running = tid in self._running_tasks and not self._running_tasks[tid].done()
+            state = "running" if is_running else status.phase
+            lines.append(
+                f"- [{tid}] {status.label}: {state} ({elapsed:.0f}s, iter {status.iteration})"
+            )
+        return "\n".join(lines)
+
+    async def cancel_task(self, task_id: str) -> str:
+        """Cancel a running subagent by task ID. Returns status message."""
+        task = self._running_tasks.get(task_id)
+        if not task:
+            return f"No running subagent found with id: {task_id}"
+        if task.done():
+            status = self._task_statuses.get(task_id)
+            phase = status.phase if status else "unknown"
+            return f"Subagent [{task_id}] already finished (status: {phase})."
+        task.cancel()
+        try:
+            await task
+        except asyncio.CancelledError:
+            pass
+        if task_id in self._task_statuses:
+            self._task_statuses[task_id].phase = "cancelled"
+        return f"Subagent [{task_id}] cancelled."
+

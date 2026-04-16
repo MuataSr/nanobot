@@ -593,6 +593,7 @@ def serve(
         unified_session=runtime_config.agents.defaults.unified_session,
         disabled_skills=runtime_config.agents.defaults.disabled_skills,
         session_ttl_minutes=runtime_config.agents.defaults.session_ttl_minutes,
+        tools_config=runtime_config.tools,
     )
 
     model_name = runtime_config.agents.defaults.model
@@ -687,6 +688,7 @@ def gateway(
         unified_session=config.agents.defaults.unified_session,
         disabled_skills=config.agents.defaults.disabled_skills,
         session_ttl_minutes=config.agents.defaults.session_ttl_minutes,
+        tools_config=config.tools,
     )
 
     # Set cron callback (needs agent)
@@ -729,7 +731,7 @@ def gateway(
         response = resp.content if resp else ""
 
         message_tool = agent.tools.get("message")
-        if isinstance(message_tool, MessageTool) and message_tool._sent_in_turn:
+        if job.payload.deliver and isinstance(message_tool, MessageTool) and message_tool._sent_in_turn:
             return response
 
         if job.payload.deliver and job.payload.to and response:
@@ -964,6 +966,7 @@ def agent(
         unified_session=config.agents.defaults.unified_session,
         disabled_skills=config.agents.defaults.disabled_skills,
         session_ttl_minutes=config.agents.defaults.session_ttl_minutes,
+        tools_config=config.tools,
     )
     restart_notice = consume_restart_notice_from_env()
     if restart_notice and should_show_cli_restart_notice(restart_notice, session_id):
