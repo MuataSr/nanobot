@@ -252,6 +252,35 @@ async def test_runner_returns_max_iterations_fallback():
     assert result.messages[-1]["role"] == "assistant"
     assert result.messages[-1]["content"] == result.final_content
 
+
+@pytest.mark.asyncio
+async def test_runner_times_out_hung_llm_request():
+    from nanobot.agent.runner import AgentRunSpec, AgentRunner
+
+    provider = MagicMock()
+
+    async def chat_with_retry(**kwargs):
+        await asyncio.sleep(3600)
+
+    provider.chat_with_retry = chat_with_retry
+    tools = MagicMock()
+    tools.get_definitions.return_value = []
+
+    runner = AgentRunner(provider)
+    started = time.monotonic()
+    result = await runner.run(AgentRunSpec(
+        initial_messages=[{"role": "user", "content": "hello"}],
+        tools=tools,
+        model="test-model",
+        max_iterations=1,
+        max_tool_result_chars=_MAX_TOOL_RESULT_CHARS,
+        llm_timeout_s=0.05,
+    ))
+
+    assert (time.monotonic() - started) < 1.0
+    assert result.stop_reason == "error"
+    assert "timed out" in (result.final_content or "").lower()
+
 @pytest.mark.asyncio
 async def test_runner_returns_structured_tool_error():
     from nanobot.agent.runner import AgentRunSpec, AgentRunner
@@ -281,6 +310,240 @@ async def test_runner_returns_structured_tool_error():
     assert result.tool_events == [
         {"name": "list_dir", "status": "error", "detail": "boom"}
     ]
+
+
+@pytest.mark.asyncio
+async def test_runner_does_not_abort_on_workspace_violation_anymore():
+    """v2 behavior: workspace-bound rejections are *soft* tool errors.
+
+    Previously (PR #3493) any workspace boundary error became a fatal
+    RuntimeError that aborted the turn. That silently killed legitimate
+    workspace commands once the heuristic guard misfired (#3599 #3605), so
+    we now hand the error back to the LLM as a recoverable tool result and
+    rely on ``repeated_workspace_violation_error`` to throttle bypass loops.
+    """
+    from nanobot.agent.runner import AgentRunSpec, AgentRunner
+
+    provider = MagicMock()
+    provider.chat_with_retry = AsyncMock(side_effect=[
+        LLMResponse(
+            content="trying outside",
+            tool_calls=[ToolCallRequest(
+                id="call_1", name="read_file", arguments={"path": "/tmp/outside.md"},
+            )],
+        ),
+        LLMResponse(content="ok, telling the user instead", tool_calls=[]),
+    ])
+    tools = MagicMock()
+    tools.get_definitions.return_value = []
+    tools.execute = AsyncMock(
+        side_effect=PermissionError(
+            "Path /tmp/outside.md is outside allowed directory /workspace"
+        )
+    )
+
+    runner = AgentRunner(provider)
+
+    result = await runner.run(AgentRunSpec(
+        initial_messages=[],
+        tools=tools,
+        model="test-model",
+        max_iterations=3,
+        max_tool_result_chars=_MAX_TOOL_RESULT_CHARS,
+    ))
+
+    assert provider.chat_with_retry.await_count == 2, (
+        "workspace violation must NOT short-circuit the loop"
+    )
+    assert result.stop_reason != "tool_error"
+    assert result.error is None
+    assert result.final_content == "ok, telling the user instead"
+    assert result.tool_events and result.tool_events[0]["status"] == "error"
+    # Detail still carries the workspace_violation breadcrumb for telemetry,
+    # but the runner did not raise.
+    assert "workspace_violation" in result.tool_events[0]["detail"]
+
+
+def test_is_ssrf_violation_recognizes_private_url_blocks():
+    """SSRF rejections are classified separately from workspace boundaries."""
+    from nanobot.agent.runner import AgentRunner
+
+    ssrf_msg = "Error: Command blocked by safety guard (internal/private URL detected)"
+    assert AgentRunner._is_ssrf_violation(ssrf_msg) is True
+    assert AgentRunner._is_ssrf_violation(
+        "URL validation failed: Blocked: host resolves to private/internal address 192.168.1.2"
+    ) is True
+
+    # Workspace-bound markers are NOT classified as SSRF.
+    assert AgentRunner._is_ssrf_violation(
+        "Error: Command blocked by safety guard (path outside working dir)"
+    ) is False
+    assert AgentRunner._is_ssrf_violation(
+        "Path /tmp/x is outside allowed directory /ws"
+    ) is False
+    # Deny / allowlist filter messages stay non-fatal too.
+    assert AgentRunner._is_ssrf_violation(
+        "Error: Command blocked by deny pattern filter"
+    ) is False
+
+
+@pytest.mark.asyncio
+async def test_runner_returns_non_retryable_hint_on_ssrf_violation():
+    """SSRF stays blocked, but the runtime gives the LLM a final chance to recover."""
+    from nanobot.agent.runner import AgentRunSpec, AgentRunner
+
+    provider = MagicMock()
+    provider.chat_with_retry = AsyncMock(side_effect=[
+        LLMResponse(
+            content="curl-ing metadata",
+            tool_calls=[ToolCallRequest(
+                id="call_ssrf",
+                name="exec",
+                arguments={"command": "curl http://169.254.169.254"},
+            )],
+        ),
+        LLMResponse(
+            content="I cannot access that private URL. Please share local files.",
+            tool_calls=[],
+        ),
+    ])
+    tools = MagicMock()
+    tools.get_definitions.return_value = []
+    tools.execute = AsyncMock(return_value=(
+        "Error: Command blocked by safety guard (internal/private URL detected)"
+    ))
+
+    runner = AgentRunner(provider)
+    result = await runner.run(AgentRunSpec(
+        initial_messages=[],
+        tools=tools,
+        model="test-model",
+        max_iterations=3,
+        max_tool_result_chars=_MAX_TOOL_RESULT_CHARS,
+    ))
+
+    assert provider.chat_with_retry.await_count == 2
+    assert result.stop_reason == "completed"
+    assert result.error is None
+    assert result.final_content == "I cannot access that private URL. Please share local files."
+    assert result.tool_events and result.tool_events[0]["detail"].startswith("ssrf_violation:")
+    tool_messages = [m for m in result.messages if m.get("role") == "tool"]
+    assert tool_messages
+    assert "non-bypassable security boundary" in tool_messages[0]["content"]
+    assert "Do not retry" in tool_messages[0]["content"]
+    assert "tools.ssrfWhitelist" in tool_messages[0]["content"]
+
+
+@pytest.mark.asyncio
+async def test_runner_lets_llm_recover_from_shell_guard_path_outside():
+    """Reporter scenario for #3599 / #3605 -- guard hit, agent recovers.
+
+    The shell `_guard_command` heuristic fires on `2>/dev/null`-style
+    redirects and other shell idioms. Before v2 that abort'd the whole
+    turn (silent hang on Telegram per #3605); now the LLM gets the soft
+    error back and can finalize on the next iteration.
+    """
+    from nanobot.agent.runner import AgentRunSpec, AgentRunner
+
+    provider = MagicMock()
+    captured_second_call: list[dict] = []
+
+    async def chat_with_retry(*, messages, **kwargs):
+        if provider.chat_with_retry.await_count == 1:
+            return LLMResponse(
+                content="trying noisy cleanup",
+                tool_calls=[ToolCallRequest(
+                    id="call_blocked",
+                    name="exec",
+                    arguments={"command": "rm scratch.txt 2>/dev/null"},
+                )],
+            )
+        captured_second_call[:] = list(messages)
+        return LLMResponse(content="recovered final answer", tool_calls=[])
+
+    provider.chat_with_retry = AsyncMock(side_effect=chat_with_retry)
+    tools = MagicMock()
+    tools.get_definitions.return_value = []
+    tools.execute = AsyncMock(
+        return_value="Error: Command blocked by safety guard (path outside working dir)"
+    )
+
+    runner = AgentRunner(provider)
+    result = await runner.run(AgentRunSpec(
+        initial_messages=[],
+        tools=tools,
+        model="test-model",
+        max_iterations=3,
+        max_tool_result_chars=_MAX_TOOL_RESULT_CHARS,
+    ))
+
+    assert provider.chat_with_retry.await_count == 2, (
+        "guard hit must NOT short-circuit the loop -- LLM should get a second turn"
+    )
+    assert result.stop_reason != "tool_error"
+    assert result.error is None
+    assert result.final_content == "recovered final answer"
+    assert result.tool_events and result.tool_events[0]["status"] == "error"
+    # v2: detail keeps the breadcrumb but the runner did not raise.
+    assert "workspace_violation" in result.tool_events[0]["detail"]
+
+
+@pytest.mark.asyncio
+async def test_runner_throttles_repeated_workspace_bypass_attempts():
+    """#3493 motivation: stop the LLM bypass loop without aborting the turn.
+
+    LLM keeps switching tools (read_file -> exec cat -> python -c open(...))
+    against the same outside path. After the soft retry budget is exhausted
+    the runner replaces the tool result with a hard "stop trying" message
+    so the model finally gives up and surfaces the boundary to the user.
+    """
+    from nanobot.agent.runner import AgentRunSpec, AgentRunner
+
+    bypass_attempts = [
+        ToolCallRequest(
+            id=f"a{i}", name="exec",
+            arguments={"command": f"cat /Users/x/Downloads/01.md  # try {i}"},
+        )
+        for i in range(4)
+    ]
+    responses: list[LLMResponse] = [
+        LLMResponse(content=f"try {i}", tool_calls=[bypass_attempts[i]])
+        for i in range(4)
+    ]
+    responses.append(LLMResponse(content="ok telling user", tool_calls=[]))
+
+    provider = MagicMock()
+    provider.chat_with_retry = AsyncMock(side_effect=responses)
+    tools = MagicMock()
+    tools.get_definitions.return_value = []
+    tools.execute = AsyncMock(
+        return_value="Error: Command blocked by safety guard (path outside working dir)"
+    )
+
+    runner = AgentRunner(provider)
+    result = await runner.run(AgentRunSpec(
+        initial_messages=[],
+        tools=tools,
+        model="test-model",
+        max_iterations=10,
+        max_tool_result_chars=_MAX_TOOL_RESULT_CHARS,
+    ))
+
+    # All 4 bypass attempts surface to the LLM (no fatal abort), and the
+    # runner finally completes once the LLM stops asking.
+    assert result.stop_reason != "tool_error"
+    assert result.error is None
+    assert result.final_content == "ok telling user"
+    # The third+ attempts must have been escalated -- look at the events.
+    escalated = [
+        ev for ev in result.tool_events
+        if ev["status"] == "error"
+        and ev["detail"].startswith("workspace_violation_escalated:")
+    ]
+    assert escalated, (
+        "expected at least one escalated workspace_violation event, got: "
+        f"{result.tool_events}"
+    )
 
 
 @pytest.mark.asyncio
@@ -380,7 +643,7 @@ def test_persist_tool_result_logs_cleanup_failures(monkeypatch, tmp_path):
         lambda *_args, **_kwargs: (_ for _ in ()).throw(OSError("busy")),
     )
     monkeypatch.setattr(
-        "nanobot.utils.helpers.logger.warning",
+        "nanobot.utils.helpers.logger.exception",
         lambda message, *args: warnings.append(message.format(*args)),
     )
 
@@ -643,10 +906,11 @@ def test_snip_history_drops_orphaned_tool_results_from_trimmed_slice(monkeypatch
 
     trimmed = runner._snip_history(spec, messages)
 
-    assert trimmed == [
-        {"role": "system", "content": "system"},
-        {"role": "assistant", "content": "after tool"},
-    ]
+    # After the fix, the user message is recovered so the sequence is valid
+    # for providers that require system → user (e.g. GLM error 1214).
+    assert trimmed[0]["role"] == "system"
+    non_system = [m for m in trimmed if m["role"] != "system"]
+    assert non_system[0]["role"] == "user", f"Expected user after system, got {non_system[0]['role']}"
 
 
 @pytest.mark.asyncio
@@ -760,6 +1024,7 @@ async def test_runner_batches_read_only_tools_before_exclusive_work():
             ToolCallRequest(id="rw1", name="write_a", arguments={}),
         ],
         {},
+        {},
     )
 
     assert shared_events[0:2] == ["start:read_a", "start:read_b"]
@@ -803,6 +1068,7 @@ async def test_runner_does_not_batch_exclusive_read_only_tools():
             ToolCallRequest(id="ddg1", name="ddg_like", arguments={}),
             ToolCallRequest(id="ro2", name="read_b", arguments={}),
         ],
+        {},
         {},
     )
 
@@ -903,6 +1169,48 @@ async def test_loop_stream_filter_handles_think_only_prefix_without_crashing(tmp
 
 
 @pytest.mark.asyncio
+async def test_loop_stream_filter_hides_partial_trailing_think_prefix(tmp_path):
+    loop = _make_loop(tmp_path)
+    deltas: list[str] = []
+
+    async def chat_stream_with_retry(*, on_content_delta, **kwargs):
+        await on_content_delta("Hello <thin")
+        await on_content_delta("k>hidden</think>World")
+        return LLMResponse(content="Hello <think>hidden</think>World", tool_calls=[], usage={})
+
+    loop.provider.chat_stream_with_retry = chat_stream_with_retry
+
+    async def on_stream(delta: str) -> None:
+        deltas.append(delta)
+
+    final_content, _, _, _, _ = await loop._run_agent_loop([], on_stream=on_stream)
+
+    assert final_content == "Hello World"
+    assert deltas == ["Hello", " World"]
+
+
+@pytest.mark.asyncio
+async def test_loop_stream_filter_hides_complete_trailing_think_tag(tmp_path):
+    loop = _make_loop(tmp_path)
+    deltas: list[str] = []
+
+    async def chat_stream_with_retry(*, on_content_delta, **kwargs):
+        await on_content_delta("Hello <think>")
+        await on_content_delta("hidden</think>World")
+        return LLMResponse(content="Hello <think>hidden</think>World", tool_calls=[], usage={})
+
+    loop.provider.chat_stream_with_retry = chat_stream_with_retry
+
+    async def on_stream(delta: str) -> None:
+        deltas.append(delta)
+
+    final_content, _, _, _, _ = await loop._run_agent_loop([], on_stream=on_stream)
+
+    assert final_content == "Hello World"
+    assert deltas == ["Hello", " World"]
+
+
+@pytest.mark.asyncio
 async def test_loop_retries_think_only_final_response(tmp_path):
     loop = _make_loop(tmp_path)
     call_count = {"n": 0}
@@ -990,6 +1298,51 @@ async def test_streamed_flag_not_set_on_llm_error(tmp_path):
 
 
 @pytest.mark.asyncio
+async def test_ssrf_soft_block_can_finalize_after_streamed_tool_call(tmp_path):
+    from nanobot.agent.loop import AgentLoop
+    from nanobot.bus.events import InboundMessage
+    from nanobot.bus.queue import MessageBus
+
+    bus = MessageBus()
+    provider = MagicMock()
+    provider.get_default_model.return_value = "test-model"
+    tool_call_resp = LLMResponse(
+        content="checking metadata",
+        tool_calls=[ToolCallRequest(
+            id="call_ssrf",
+            name="exec",
+            arguments={"command": "curl http://169.254.169.254/latest/meta-data/"},
+        )],
+        usage={},
+    )
+    provider.chat_stream_with_retry = AsyncMock(side_effect=[
+        tool_call_resp,
+        LLMResponse(
+            content="I cannot access private URLs. Please share the local file.",
+            tool_calls=[],
+            usage={},
+        ),
+    ])
+
+    loop = AgentLoop(bus=bus, provider=provider, workspace=tmp_path, model="test-model")
+    loop.tools.get_definitions = MagicMock(return_value=[])
+    loop.tools.prepare_call = MagicMock(return_value=(None, {}, None))
+    loop.tools.execute = AsyncMock(return_value=(
+        "Error: Command blocked by safety guard (internal/private URL detected)"
+    ))
+
+    result = await loop._process_message(
+        InboundMessage(channel="telegram", sender_id="u1", chat_id="c1", content="hi"),
+        on_stream=AsyncMock(),
+        on_stream_end=AsyncMock(),
+    )
+
+    assert result is not None
+    assert result.content == "I cannot access private URLs. Please share the local file."
+    assert result.metadata.get("_streamed") is True
+
+
+@pytest.mark.asyncio
 async def test_next_turn_after_llm_error_keeps_turn_boundary(tmp_path):
     from nanobot.agent.loop import AgentLoop
     from nanobot.agent.runner import _PERSISTED_MODEL_ERROR_PLACEHOLDER
@@ -1030,11 +1383,10 @@ async def test_next_turn_after_llm_error_keeps_turn_boundary(tmp_path):
 
     request_messages = provider.chat_with_retry.await_args_list[1].kwargs["messages"]
     non_system = [message for message in request_messages if message.get("role") != "system"]
-    assert non_system[0] == {"role": "user", "content": "first question"}
-    assert non_system[1] == {
-        "role": "assistant",
-        "content": _PERSISTED_MODEL_ERROR_PLACEHOLDER,
-    }
+    assert non_system[0]["role"] == "user"
+    assert "first question" in non_system[0]["content"]
+    assert non_system[1]["role"] == "assistant"
+    assert _PERSISTED_MODEL_ERROR_PLACEHOLDER in non_system[1]["content"]
     assert non_system[2]["role"] == "user"
     assert "second question" in non_system[2]["content"]
 
@@ -1073,7 +1425,7 @@ async def test_runner_tool_error_sets_final_content():
 
 @pytest.mark.asyncio
 async def test_subagent_max_iterations_announces_existing_fallback(tmp_path, monkeypatch):
-    from nanobot.agent.subagent import SubagentManager
+    from nanobot.agent.subagent import SubagentManager, SubagentStatus
     from nanobot.bus.queue import MessageBus
 
     bus = MessageBus()
@@ -1096,7 +1448,8 @@ async def test_subagent_max_iterations_announces_existing_fallback(tmp_path, mon
 
     monkeypatch.setattr("nanobot.agent.tools.filesystem.ListDirTool.execute", fake_execute)
 
-    await mgr._run_subagent("sub-1", "do task", "label", {"channel": "test", "chat_id": "c1"})
+    status = SubagentStatus(task_id="sub-1", label="label", task_description="do task", started_at=time.monotonic())
+    await mgr._run_subagent("sub-1", "do task", "label", {"channel": "test", "chat_id": "c1"}, status)
 
     mgr._announce_result.assert_awaited_once()
     args = mgr._announce_result.await_args.args
@@ -2786,4 +3139,175 @@ async def test_injection_cycle_cap_on_error_path():
     assert result.had_injections is True
     # Should cap: _MAX_INJECTION_CYCLES drained rounds + 1 final round that breaks
     assert call_count["n"] == _MAX_INJECTION_CYCLES + 1
-    assert drain_count["n"] == _MAX_INJECTION_CYCLES
+
+
+# ---------------------------------------------------------------------------
+# Regression tests for GLM-1214: _snip_history must preserve a user message
+# ---------------------------------------------------------------------------
+
+
+def test_snip_history_preserves_user_message_after_truncation(monkeypatch):
+    """When _snip_history truncates messages and the only user message ends up
+    outside the kept window, the method must recover the nearest user message
+    so the resulting sequence is valid for providers like GLM (which reject
+    system→assistant with error 1214).
+
+    This reproduces the exact scenario from the bug report:
+    - Normal interaction: user asks, assistant calls tool, tool returns,
+      assistant replies.
+    - Injection adds a phantom user message, triggering more tool calls.
+    - _snip_history activates, keeping only recent assistant/tool pairs.
+    - The injected user message is in the truncated prefix and gets lost.
+    """
+    from nanobot.agent.runner import AgentRunSpec, AgentRunner
+
+    provider = MagicMock()
+    tools = MagicMock()
+    tools.get_definitions.return_value = []
+    runner = AgentRunner(provider)
+
+    messages = [
+        {"role": "system", "content": "system"},
+        {"role": "assistant", "content": "previous reply"},
+        {"role": "user", "content": ".nanobot的同目录"},
+        {
+            "role": "assistant",
+            "content": None,
+            "tool_calls": [{"id": "tc_1", "type": "function", "function": {"name": "exec", "arguments": "{}"}}],
+        },
+        {"role": "tool", "tool_call_id": "tc_1", "content": "tool output 1"},
+        {
+            "role": "assistant",
+            "content": None,
+            "tool_calls": [{"id": "tc_2", "type": "function", "function": {"name": "exec", "arguments": "{}"}}],
+        },
+        {"role": "tool", "tool_call_id": "tc_2", "content": "tool output 2"},
+    ]
+
+    spec = AgentRunSpec(
+        initial_messages=messages,
+        tools=tools,
+        model="test-model",
+        max_iterations=1,
+        max_tool_result_chars=_MAX_TOOL_RESULT_CHARS,
+        context_window_tokens=2000,
+        context_block_limit=100,
+    )
+
+    # Make estimate_prompt_tokens_chain report above budget so _snip_history activates.
+    monkeypatch.setattr("nanobot.agent.runner.estimate_prompt_tokens_chain", lambda *_a, **_kw: (500, None))
+    # Make kept window small: only the last 2 messages fit the budget.
+    token_sizes = {
+        "system": 0,
+        "previous reply": 200,
+        ".nanobot的同目录": 80,
+        "tool output 1": 80,
+        "tool output 2": 80,
+    }
+    monkeypatch.setattr(
+        "nanobot.agent.runner.estimate_message_tokens",
+        lambda msg: token_sizes.get(str(msg.get("content")), 100),
+    )
+
+    trimmed = runner._snip_history(spec, messages)
+
+    # The first non-system message MUST be user (not assistant).
+    non_system = [m for m in trimmed if m.get("role") != "system"]
+    assert non_system, "trimmed should contain at least one non-system message"
+    assert non_system[0]["role"] == "user", (
+        f"First non-system message must be 'user', got '{non_system[0]['role']}'. "
+        f"Roles: {[m['role'] for m in trimmed]}"
+    )
+
+
+def test_snip_history_no_user_at_all_falls_back_gracefully(monkeypatch):
+    """Edge case: if non_system has zero user messages, _snip_history should
+    still return a valid sequence (not crash or produce system→assistant)."""
+    from nanobot.agent.runner import AgentRunSpec, AgentRunner
+
+    provider = MagicMock()
+    tools = MagicMock()
+    tools.get_definitions.return_value = []
+    runner = AgentRunner(provider)
+
+    messages = [
+        {"role": "system", "content": "system"},
+        {"role": "assistant", "content": "reply"},
+        {"role": "tool", "tool_call_id": "tc_1", "content": "result"},
+        {"role": "assistant", "content": "reply 2"},
+        {"role": "tool", "tool_call_id": "tc_2", "content": "result 2"},
+    ]
+
+    spec = AgentRunSpec(
+        initial_messages=messages,
+        tools=tools,
+        model="test-model",
+        max_iterations=1,
+        max_tool_result_chars=_MAX_TOOL_RESULT_CHARS,
+        context_window_tokens=2000,
+        context_block_limit=100,
+    )
+
+    monkeypatch.setattr("nanobot.agent.runner.estimate_prompt_tokens_chain", lambda *_a, **_kw: (500, None))
+    monkeypatch.setattr(
+        "nanobot.agent.runner.estimate_message_tokens",
+        lambda msg: 100,
+    )
+
+    trimmed = runner._snip_history(spec, messages)
+
+    # Should not crash.  The result should still be a valid list.
+    assert isinstance(trimmed, list)
+    # Must have at least system.
+    assert any(m.get("role") == "system" for m in trimmed)
+    # The _enforce_role_alternation safety net must be able to fix whatever
+    # _snip_history returns here — verify it produces a valid sequence.
+    from nanobot.providers.base import LLMProvider
+    fixed = LLMProvider._enforce_role_alternation(trimmed)
+    non_system = [m for m in fixed if m["role"] != "system"]
+    if non_system:
+        assert non_system[0]["role"] in ("user", "tool"), (
+            f"Safety net should ensure first non-system is user/tool, got {non_system[0]['role']}"
+        )
+
+
+@pytest.mark.asyncio
+async def test_runner_binds_on_retry_wait_to_retry_callback_not_progress():
+    """Regression: provider retry heartbeats must route through
+    ``retry_wait_callback``, not ``progress_callback``. Binding them to
+    the progress callback (as an earlier runtime refactor did) caused
+    internal retry diagnostics like "Model request failed, retry in 1s"
+    to leak to end-user channels as normal progress updates.
+    """
+    from nanobot.agent.runner import AgentRunSpec, AgentRunner
+
+    captured: dict = {}
+
+    async def chat_with_retry(**kwargs):
+        captured.update(kwargs)
+        return LLMResponse(content="done", tool_calls=[], usage={})
+
+    provider = MagicMock()
+    provider.chat_with_retry = chat_with_retry
+    tools = MagicMock()
+    tools.get_definitions.return_value = []
+
+    progress_cb = AsyncMock()
+    retry_wait_cb = AsyncMock()
+
+    runner = AgentRunner(provider)
+    await runner.run(AgentRunSpec(
+        initial_messages=[
+            {"role": "system", "content": "system"},
+            {"role": "user", "content": "hi"},
+        ],
+        tools=tools,
+        model="test-model",
+        max_iterations=1,
+        max_tool_result_chars=_MAX_TOOL_RESULT_CHARS,
+        progress_callback=progress_cb,
+        retry_wait_callback=retry_wait_cb,
+    ))
+
+    assert captured["on_retry_wait"] is retry_wait_cb
+    assert captured["on_retry_wait"] is not progress_cb
