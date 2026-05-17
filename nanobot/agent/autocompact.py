@@ -18,10 +18,11 @@ class AutoCompact:
     _RECENT_SUFFIX_MESSAGES = 8
 
     def __init__(self, sessions: SessionManager, consolidator: Consolidator,
-                 session_ttl_minutes: int = 0):
+                 session_ttl_minutes: int = 0, token_threshold: int = 0):
         self.sessions = sessions
         self.consolidator = consolidator
         self._ttl = session_ttl_minutes
+        self._token_threshold = token_threshold
         self._archiving: set[str] = set()
         self._summaries: dict[str, tuple[str, datetime]] = {}
 
@@ -36,6 +37,14 @@ class AutoCompact:
     @staticmethod
     def _format_summary(text: str, last_active: datetime) -> str:
         return f"Previous conversation summary (last active {last_active.isoformat()}):\n{text}"
+
+    def _estimate_tokens(self, session: Session) -> int:
+        """Rough token estimate: chars / 4 for English text."""
+        total_chars = sum(
+            len(msg.get("content", "")) if isinstance(msg.get("content"), str) else 0
+            for msg in session.messages
+        )
+        return total_chars // 4
 
     def _split_unconsolidated(
         self, session: Session,
@@ -68,7 +77,14 @@ class AutoCompact:
                 continue
             if key in active_session_keys:
                 continue
-            if self._is_expired(info.get("updated_at"), now):
+            session = self.sessions.get_or_create(key)
+            token_est = self._estimate_tokens(session)
+            ttl_expired = self._is_expired(info.get("updated_at"), now)
+            token_exceeded = (
+                self._token_threshold > 0
+                and token_est >= self._token_threshold
+            )
+            if ttl_expired or token_exceeded:
                 self._archiving.add(key)
                 schedule_background(self._archive(key))
 

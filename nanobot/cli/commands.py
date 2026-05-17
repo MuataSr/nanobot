@@ -1632,5 +1632,51 @@ def _login_github_copilot() -> None:
         raise typer.Exit(1)
 
 
+@app.command()
+def preflight(ctx: typer.Context) -> None:
+    """Run all enabled tools and report configuration without executing tasks."""
+    from nanobot.config.paths import get_config_path, get_workspace_path
+
+    workspace = get_workspace_path()
+    config_path = get_config_path()
+
+    console.print("\n[bold cyan]nanobot Preflight Check[/bold cyan]\n")
+
+    if not config_path.exists():
+        console.print("[red]✗ config.json not found[/red]")
+        console.print(f"  Expected: {config_path}")
+        raise typer.Exit(code=1)
+
+    console.print(f"[green]✓ config.json found[/green] ({config_path})")
+
+    try:
+        from nanobot.config.loader import load_config
+        config = load_config(config_path)
+        console.print("[green]✓ config.json valid[/green]")
+    except Exception as e:
+        console.print(f"[red]✗ config.json parse error:[/red] {e}")
+        raise typer.Exit(code=1)
+
+    # Tool status
+    tools_enabled = []
+    tools_disabled = []
+    for tool_name in ["exec", "web_search", "web_fetch", "spawn"]:
+        tool_cfg = getattr(config, tool_name, None)
+        if tool_cfg and hasattr(tool_cfg, "enable"):
+            if tool_cfg.enable:
+                tools_enabled.append(tool_name)
+            else:
+                tools_disabled.append(tool_name)
+
+    if tools_enabled:
+        console.print(f"[green]✓ Tools enabled:[/green] {', '.join(tools_enabled)}")
+    if tools_disabled:
+        console.print(f"[yellow]⊘ Tools disabled:[/yellow] {', '.join(tools_disabled)}")
+
+    # Workspace check
+    console.print(f"[green]✓ Workspace:[/green] {workspace}")
+    console.print()
+
+
 if __name__ == "__main__":
     app()

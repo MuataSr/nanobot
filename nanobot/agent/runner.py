@@ -819,10 +819,31 @@ class AgentRunner:
                 RuntimeError(prep_error) if spec.fail_on_tool_error else None
             )
 
-        # Per-tool before hook
+        # Per-tool before hook (may raise GovernanceDenied)
         if hook is not None:
             tc_ctx = ToolCallContext(tool_name=tool_call.name, arguments=tool_call.arguments)
-            await hook.before_tool_call(tc_ctx)
+            try:
+                await hook.before_tool_call(tc_ctx)
+            except Exception as gov_exc:
+                # GovernanceDenied (or any hook denial) → return as tool error
+                # so the model sees the denial reason and doesn't retry.
+                from nanobot.governance.permissions import GovernanceDenied as _GovDenied
+                if isinstance(gov_exc, _GovDenied):
+                    reason = gov_exc.decision.reason
+                    rule = gov_exc.decision.rule_id
+                    risk = gov_exc.decision.risk_level.value
+                    denial_msg = (
+                        f"Blocked by governance policy: {reason} "
+                        f"(rule={rule}, risk={risk}). "
+                        f"Choose a different approach — do not retry the same command."
+                    )
+                    event = {
+                        "name": tool_call.name,
+                        "status": "governance_denied",
+                        "detail": denial_msg[:120],
+                    }
+                    return denial_msg, event, None
+                raise
 
         try:
             if tool is not None:

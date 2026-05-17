@@ -1,0 +1,116 @@
+# nanobot Governance Constitution
+# ================================
+# Copy to ~/.nanobot/constitution.yaml or your workspace root.
+# No file = safe built-in defaults (zero behavior change).
+#
+# Enable in config.json:
+#   "hooks": {
+#     "enabled_hooks": ["governance"],
+#     "config": {
+#       "governance": {
+#         "constitution_path": "constitution.yaml"
+#       }
+#     }
+#   }
+
+version: "1.0"
+
+# ---------------------------------------------------------------------------
+# Identity — who this agent is and what boundaries it respects
+# ---------------------------------------------------------------------------
+identity:
+  name: nanobot
+  boundaries:
+    - Only modify files within the designated workspace
+    - Never expose secrets, API keys, or tokens in output
+    - Ask before destructive operations (rm -rf, format, dd)
+    - Never modify nanobot's own source without user approval
+    - Respect .gitignore and workspace boundaries
+
+# ---------------------------------------------------------------------------
+# Tool permissions — override per-tool policy
+# ---------------------------------------------------------------------------
+# policy values:
+#   open       = always allowed (no governance check)
+#   restricted = checked against risk classifier + deny/allow patterns
+#   locked     = always denied unless explicitly in allow_patterns
+#
+permissions:
+  exec:
+    policy: restricted
+    deny_patterns:
+      - "rm -rf /"
+      - "mkfs"
+      - "dd of=/dev/"
+    allow_patterns: []
+    deny_paths: []
+    ask_paths:
+      - "/etc/"
+      - "/boot/"
+      - "/usr/lib/"
+
+  edit_file:
+    policy: restricted
+    deny_patterns: []
+    allow_patterns: []
+    deny_paths:
+      - "/etc/shadow"
+      - "/etc/passwd"
+      - "/etc/sudoers"
+      - "/etc/ssh/sshd_config"
+      - ".ssh/authorized_keys"
+    ask_paths:
+      - ".env"
+
+  write_file:
+    policy: restricted
+    deny_patterns: []
+    allow_patterns: []
+    deny_paths:
+      - "/etc/shadow"
+      - "/etc/passwd"
+      - "/etc/sudoers"
+      - "/boot/"
+    ask_paths:
+      - ".env"
+      - "credentials.json"
+
+  read_file:
+    policy: open
+    deny_patterns: []
+    allow_patterns: []
+    deny_paths: []
+    ask_paths:
+      - ".ssh/id_rsa"
+      - ".ssh/id_ed25519"
+      - ".pem"
+
+# ---------------------------------------------------------------------------
+# Defaults — how to handle tools not listed above
+# ---------------------------------------------------------------------------
+defaults:
+  unknown_tool: ask    # ask | allow | deny
+  on_error: deny       # fail-closed: deny on classification error
+
+# ---------------------------------------------------------------------------
+# Risk thresholds — map risk level → action
+# ---------------------------------------------------------------------------
+# Each value: allow | ask | deny
+#
+# Built-in risk classifier uses ~36 curated patterns organized by
+# tool family (bash, file_write, secrets, sensitive_read,
+# nanobot_protect) and risk level (critical, high, medium, low).
+#
+risk:
+  critical: deny       # rm -rf /, mkfs, fork bombs, AWS keys in commands
+  high: deny           # pipe-to-sh, force-push main, dd output, rm -rf
+  medium: allow        # sudo, package install/remove, firewall, systemctl
+  low: allow           # everything else
+
+# ---------------------------------------------------------------------------
+# Audit logging — append-only JSONL record of governance decisions
+# ---------------------------------------------------------------------------
+audit:
+  enabled: true
+  output: ""           # empty = ~/.nanobot/audit.jsonl
+  max_size_mb: 10.0    # auto-rotate at this size

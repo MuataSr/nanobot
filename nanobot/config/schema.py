@@ -107,6 +107,13 @@ class ModelPresetConfig(Base):
         )
 
 
+class HookConfig(Base):
+    """Lifecycle hook configuration loaded from config.json."""
+
+    enabled_hooks: list[str] = Field(default_factory=list)  # Names of hook modules to load (e.g. ["telegram", "safety"])
+    config: dict[str, Any] = Field(default_factory=dict)  # Arbitrary per-hook config passed to hook constructors
+
+
 class AgentDefaults(Base):
     """Default agent configuration."""
 
@@ -123,6 +130,7 @@ class AgentDefaults(Base):
     fallback_models: list[FallbackCandidate] = Field(default_factory=list)
     max_tool_iterations: int = 200
     max_concurrent_subagents: int = Field(default=1, ge=1)
+    compact_token_threshold: int = 0  # 0 = disabled; set to e.g. 80000 for 80K tokens
     max_tool_result_chars: int = 16_000
     provider_retry_mode: Literal["standard", "persistent"] = "standard"
     tool_hint_max_length: int = Field(
@@ -156,6 +164,7 @@ class AgentDefaults(Base):
         serialization_alias="consolidationRatio",
     )  # Consolidation target ratio (0.5 = 50% of budget retained after compression)
     dream: DreamConfig = Field(default_factory=DreamConfig)
+    hooks: HookConfig = Field(default_factory=HookConfig)
 
 
 class AgentsConfig(Base):
