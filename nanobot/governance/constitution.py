@@ -201,9 +201,12 @@ class Constitution(BaseModel):
                 constitution.rule_count,
             )
             return constitution
-        except Exception as exc:
+        except (OSError, yaml.YAMLError, ValueError) as exc:
             logger.error("Failed to load constitution from {}: {} — using defaults", path, exc)
             return cls.default()
+        except Exception as exc:
+            logger.exception("Unexpected error loading constitution from {}", path)
+            raise
 
     @classmethod
     def default(cls) -> Constitution:

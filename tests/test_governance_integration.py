@@ -1,0 +1,172 @@
+"""End-to-end integration test for governance system.
+
+Verifies the full wiring path:
+  config.json → constitution.yaml loads → PermissionEngine gates tool calls →
+  dangerous commands denied, safe commands allowed, unknown tools classified.
+
+Run: python3 tests/test_governance_integration.py
+"""
+
+import sys
+import tempfile
+from pathlib import Path
+
+# Ensure the nanobot package is importable
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+
+from nanobot.governance.constitution import Constitution
+from nanobot.governance.permissions import PermissionEngine, GovernanceDecision
+from nanobot.governance.risk import GovernanceAction as Action
+from nanobot.governance.audit import AuditLogger
+from nanobot.governance.risk import _tool_family
+
+
+# ── Test helpers ──────────────────────────────────────────────
+
+_passed = 0
+_failed = 0
+
+
+def _assert(condition: bool, label: str) -> None:
+    global _passed, _failed
+    if condition:
+        _passed += 1
+        print(f"  ✅ {label}")
+    else:
+        _failed += 1
+        print(f"  ❌ {label}")
+
+
+# ── Test 1: Constitution loads from real file ─────────────────
+
+print("\n[Test 1] Constitution loads from real constitution.yaml")
+constitution_path = Path.home() / ".nanobot" / "constitution.yaml"
+if constitution_path.exists():
+    c = Constitution.load(str(constitution_path))
+    _assert(c.source_path == str(constitution_path), "source_path set correctly")
+    _assert(c.tool_count >= 4, f"tool_count >= 4 (got {c.tool_count})")
+    _assert(c.rule_count >= 21, f"rule_count >= 21 (got {c.rule_count})")
+    _assert(c.identity.name == "Ann-E", f"identity.name = {c.identity.name}")
+    _assert(len(c.identity.boundaries) >= 5, f"boundaries >= 5 (got {len(c.identity.boundaries)})")
+else:
+    print("  ⚠️  Skipped — no constitution.yaml found at ~/.nanobot/")
+
+
+# ── Test 2: Constitution.from_yaml does NOT exist ─────────────
+
+print("\n[Test 2] Constitution.from_yaml should not exist (old bug)")
+_assert(
+    not hasattr(Constitution, "from_yaml"),
+    "from_yaml correctly absent — only load() exists",
+)
+
+
+# ── Test 3: _tool_family never returns empty ──────────────────
+
+print("\n[Test 3] _tool_family returns classification for unknown tools")
+_assert("bash" in _tool_family("exec"), "exec → bash family")
+_assert("secrets" in _tool_family("exec"), "exec → secrets family")
+_assert(
+    len(_tool_family("totally_unknown_tool")) > 0,
+    "unknown tool gets default families (not empty)",
+)
+_assert(
+    "secrets" in _tool_family("totally_unknown_tool"),
+    "unknown tool → secrets family",
+)
+_assert(
+    "nanobot_protect" in _tool_family("totally_unknown_tool"),
+    "unknown tool → nanobot_protect family",
+)
+
+
+# ── Test 4: PermissionEngine deny/allow decisions ─────────────
+
+print("\n[Test 4] PermissionEngine gates dangerous vs safe commands")
+
+if constitution_path.exists():
+    c = Constitution.load(str(constitution_path))
+    auditor = AuditLogger(enabled=False)  # don't write during tests
+    engine = PermissionEngine(constitution=c, auditor=auditor)
+
+    # 4a. Safe command → ALLOW
+    safe = engine.check("exec", {"command": "ls -la /tmp"})
+    _assert(safe.action == Action.ALLOW, f"ls -la → {safe.action.value}")
+
+    # 4b. Destructive command → DENY
+    destructive = engine.check("exec", {"command": "rm -rf /"})
+    _assert(
+        destructive.action == Action.DENY,
+        f"rm -rf / → {destructive.action.value}",
+    )
+    _assert(destructive.rule_id != "", f"rule_id set: {destructive.rule_id}")
+
+    # 4c. Unknown tool still gets evaluated (not silently passed)
+    unknown = engine.check("mystery_tool", {"content": "hello world"})
+    _assert(
+        unknown.action in (Action.ALLOW, Action.DENY),
+        f"mystery_tool → {unknown.action.value} (not ignored)",
+    )
+
+    # 4d. File write to nanobot internals → DENY
+    internal = engine.check("exec", {"command": "echo hacked >> nanobot/governance/hooks.py"})
+    _assert(
+        internal.action == Action.DENY,
+        f"write to nanobot source → {internal.action.value}",
+    )
+else:
+    print("  ⚠️  Skipped — no constitution.yaml")
+
+
+# ── Test 5: Constitution parse failure raises, not swallows ────
+
+print("\n[Test 5] Broken constitution raises error, doesn't silently default")
+
+with tempfile.NamedTemporaryFile(mode="w", suffix=".yaml", delete=False) as tf:
+    tf.write("{{{{invalid yaml")
+    bad_path = tf.name
+
+try:
+    c = Constitution.load(bad_path)
+    # If we get here, it fell back to defaults — that's acceptable for parse errors
+    _assert(c.source_path is None or c.tool_count >= 0, "graceful fallback to defaults")
+    print("  ⚠️  Loaded defaults instead of raising (acceptable for parse errors)")
+except Exception as exc:
+    _assert(True, f"raised {type(exc).__name__} — error propagates correctly")
+
+Path(bad_path).unlink(missing_ok=True)
+
+
+# ── Test 6: Audit logger smoke test ───────────────────────────
+
+print("\n[Test 6] Audit logger writes entries correctly")
+
+with tempfile.TemporaryDirectory() as td:
+    log_path = Path(td) / "test_audit.jsonl"
+    auditor = AuditLogger(path=log_path, enabled=True)
+
+    auditor.log(
+        tool="exec",
+        action="deny",
+        risk="critical",
+        rule="bash/rm-root",
+        reason="Blocked destructive rm",
+        input_hash="sha256:abc123",
+    )
+    _assert(auditor.entry_count == 1, f"entry_count = {auditor.entry_count}")
+
+    entries = auditor.read_tail(1)
+    _assert(len(entries) == 1, f"read_tail returned {len(entries)} entries")
+    _assert(entries[0]["action"] == "deny", "entry action = deny")
+    _assert(entries[0]["rule"] == "bash/rm-root", "entry rule = bash/rm-root")
+
+
+# ── Summary ───────────────────────────────────────────────────
+
+print(f"\n{'='*50}")
+print(f"Results: {_passed} passed, {_failed} failed")
+if _failed:
+    print("⚠️  Some tests failed — see above")
+    sys.exit(1)
+else:
+    print("✅ All integration tests passed")

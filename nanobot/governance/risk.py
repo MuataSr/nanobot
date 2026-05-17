@@ -60,6 +60,10 @@ def _tool_family(tool_name: str) -> list[str]:
 
     Returns a list because some tools (like exec) need checking against
     multiple families.
+
+    Unknown tools get a default classification that at least checks
+    for secrets and protects nanobot internals — no tool should ever
+    pass through with zero risk scrutiny.
     """
     mapping: dict[str, list[str]] = {
         "exec": ["bash", "secrets", "nanobot_protect"],
@@ -68,7 +72,7 @@ def _tool_family(tool_name: str) -> list[str]:
         "write_file": ["file_write", "secrets", "nanobot_protect"],
         "read_file": ["sensitive_read", "secrets"],
     }
-    return mapping.get(tool_name, [])
+    return mapping.get(tool_name, ["secrets", "nanobot_protect"])
 
 
 def _extract_target_path(arguments: dict[str, Any]) -> str:
@@ -138,7 +142,8 @@ class RiskClassifier:
                 for pattern, rule_id, reason in level_rules:
                     # Bash patterns check against the command text
                     if family in ("bash", "nanobot_protect"):
-                        if command_text and pattern.search(command_text):
+                        text = command_text or content_str
+                        if text and pattern.search(text):
                             return risk_level, rule_id, reason
                     # File write patterns check against the target path
                     elif family == "file_write":

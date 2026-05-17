@@ -137,7 +137,7 @@ class PermissionEngine:
             decision = self._evaluate(tool_name, norm_tool, arguments, input_hash)
         except Exception as exc:
             # Priority 8: error during evaluation → fail-closed
-            logger.error("Governance evaluation error: {}", exc)
+            logger.exception("Governance evaluation error for tool={}", tool_name)
             decision = GovernanceDecision(
                 action=GovernanceAction(self._constitution.defaults.on_error),
                 risk_level=RiskLevel.LOW,

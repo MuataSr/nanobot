@@ -284,6 +284,23 @@ NANOBOT_PROTECT: list[tuple[re.Pattern[str], str, str]] = [
         "nanobot/history-sed",
         "Blocked in-place edit of nanobot history files",
     ),
+    # Protect nanobot source code from tampering
+    (
+        re.compile(
+            r"(?:>>|>|\btee\b|\bcat\b[^|]*>>?)[^|;&<>]*"
+            r"(?:nanobot/governance|nanobot/hooks|nanobot/soul|nanobot/config)"
+        ),
+        "nanobot/source-write",
+        "Blocked write to nanobot governance/source files",
+    ),
+    (
+        re.compile(
+            r"\b(?:cp|mv)\b[^|;&<>]*"
+            r"(?:nanobot/governance|nanobot/hooks)"
+        ),
+        "nanobot/source-cp-mv",
+        "Blocked copy/move targeting nanobot source files",
+    ),
 ]
 
 # ---------------------------------------------------------------------------
