@@ -32,6 +32,8 @@ from nanobot.agent.hook import (
     HookRegistry,
     ToolCallContext,
 )
+import yaml as _yaml  # noqa: F401 — needed for except clause
+
 from nanobot.governance.permissions import GovernanceDenied, PermissionEngine
 from nanobot.governance.constitution import Constitution
 from nanobot.governance.audit import AuditLogger
@@ -55,11 +57,14 @@ class GovernanceHook(ConfigurableHook):
         constitution_path = (config or {}).get("constitution_path")
         if constitution_path:
             try:
-                self._constitution = Constitution.from_yaml(constitution_path)
+                self._constitution = Constitution.load(constitution_path)
                 logger.info("Governance: loaded constitution from {}", constitution_path)
-            except Exception as exc:
+            except (FileNotFoundError, ValueError, yaml.YAMLError) as exc:
                 logger.warning("Governance: failed to load constitution from {}: {} — using defaults", constitution_path, exc)
                 self._constitution = Constitution.default()
+            except Exception as exc:
+                logger.error("Governance: unexpected error loading constitution from {}: {!r}", constitution_path, exc)
+                raise
         else:
             self._constitution = Constitution.default()
 
