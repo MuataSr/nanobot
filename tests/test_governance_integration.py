@@ -16,9 +16,10 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from nanobot.governance.constitution import Constitution
 from nanobot.governance.permissions import PermissionEngine, GovernanceDecision
-from nanobot.governance.risk import GovernanceAction as Action
+from nanobot.governance.risk import GovernanceAction as Action, RiskLevel
 from nanobot.governance.audit import AuditLogger
 from nanobot.governance.risk import _tool_family
+from nanobot.governance.constitution import ToolPermission
 
 
 # ── Test helpers ──────────────────────────────────────────────
@@ -221,6 +222,115 @@ tools:
 
 print(f"\n{'='*50}")
 print(f"Results: {_passed} passed, {_failed} failed")
+
+
+# ── Test 8: Rule chain composition ────────────────────────────
+
+print("\n[Test 8] Rule chain is composable and independently testable")
+
+from nanobot.governance.permissions import (
+    ConstitutionDenyRule,
+    RiskThresholdRule,
+    ConstitutionAllowRule,
+    PolicyLockedRule,
+    PolicyOpenRule,
+    PolicyRestrictedRule,
+    UnknownToolRule,
+    _EvalContext,
+)
+
+# Verify engine has exactly 7 rules
+engine_for_chain = PermissionEngine(auditor=AuditLogger(enabled=False))
+_assert(
+    len(engine_for_chain.rules) == 7,
+    f"Expected 7 rules, got {len(engine_for_chain.rules)}",
+)
+
+# Verify rule types in order
+expected_types = [
+    ConstitutionDenyRule,
+    RiskThresholdRule,
+    ConstitutionAllowRule,
+    PolicyLockedRule,
+    PolicyOpenRule,
+    PolicyRestrictedRule,
+    UnknownToolRule,
+]
+for i, (rule, expected) in enumerate(zip(engine_for_chain.rules, expected_types)):
+    _assert(
+        type(rule) is expected,
+        f"Rule {i}: expected {expected.__name__}, got {type(rule).__name__}",
+    )
+
+# Test a rule in isolation: PolicyLockedRule should deny locked tools
+locked_ctx = _EvalContext(
+    tool_name="test_locked",
+    norm_tool="test_locked",
+    arguments={},
+    input_hash="abc123",
+    text="",
+    path="",
+    risk_level=RiskLevel.LOW,
+    rule_id="",
+    reason="",
+    perm=ToolPermission(policy="locked"),
+)
+locked_rule = PolicyLockedRule()
+locked_result = locked_rule.check(locked_ctx)
+_assert(
+    locked_result is not None and locked_result.action == Action.DENY,
+    f"PolicyLockedRule should deny locked tools, got {locked_result}",
+)
+
+# Test a rule in isolation: PolicyOpenRule should allow open tools
+open_ctx = _EvalContext(
+    tool_name="test_open",
+    norm_tool="test_open",
+    arguments={},
+    input_hash="abc123",
+    text="",
+    path="",
+    risk_level=RiskLevel.LOW,
+    rule_id="",
+    reason="",
+    perm=ToolPermission(policy="open"),
+)
+open_rule = PolicyOpenRule()
+open_result = open_rule.check(open_ctx)
+_assert(
+    open_result is not None and open_result.action == Action.ALLOW,
+    f"PolicyOpenRule should allow open tools, got {open_result}",
+)
+
+# Test UnknownToolRule in isolation: always returns a decision (never None)
+from nanobot.governance.constitution import Constitution as C2
+unknown_ctx = _EvalContext(
+    tool_name="mystery",
+    norm_tool="mystery",
+    arguments={},
+    input_hash="abc123",
+    text="",
+    path="",
+    risk_level=RiskLevel.LOW,
+    rule_id="",
+    reason="",
+    perm=ToolPermission(policy="restricted"),
+)
+unknown_rule = UnknownToolRule(C2.default())
+unknown_result = unknown_rule.check(unknown_ctx)
+_assert(
+    unknown_result is not None,
+    "UnknownToolRule must always return a decision",
+)
+_assert(
+    unknown_result.rule_id == "default/unknown_tool",
+    f"UnknownToolRule rule_id = {unknown_result.rule_id}",
+)
+
+
+# ── Final Summary ─────────────────────────────────────────────
+
+print(f"\nFinal: {_passed} passed, {_failed} failed")
 if _failed:
     print("⚠️  Some tests failed — see above")
     sys.exit(1)
