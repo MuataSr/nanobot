@@ -161,6 +161,62 @@ with tempfile.TemporaryDirectory() as td:
     _assert(entries[0]["rule"] == "bash/rm-root", "entry rule = bash/rm-root")
 
 
+# ── Test 7: ASK action returns ASK, not ALLOW ──────────────────
+
+print("\n[Test 7] ASK action is returned correctly (not silently passed)")
+
+with tempfile.TemporaryDirectory() as td:
+    # Create a constitution with medium risk → ask
+    ask_constitution_yaml = """
+identity:
+  name: TestBot
+  boundaries: []
+
+risk:
+  critical: deny
+  high: deny
+  medium: ask
+  low: allow
+
+defaults:
+  unknown_tool: deny
+  on_error: deny
+
+tools:
+  exec:
+    policy: restricted
+    deny_patterns: []
+    allow_patterns: []
+    deny_paths: []
+    ask_paths: []
+"""
+    ask_path = Path(td) / "ask_constitution.yaml"
+    ask_path.write_text(ask_constitution_yaml)
+    ask_c = Constitution.load(str(ask_path))
+    ask_engine = PermissionEngine(constitution=ask_c, auditor=AuditLogger(enabled=False))
+
+    # "ls" is low risk normally, but we need to trigger medium
+    # Use a command that triggers medium risk rules (e.g., network)
+    # Actually, let's test via unknown tool which goes to default
+    # For a direct test: check that risk_action("medium") returns "ask"
+    _assert(
+        ask_c.risk_action("medium") == "ask",
+        f"risk_action(medium) = {ask_c.risk_action('medium')}",
+    )
+
+    # And verify a medium-risk classified tool returns ASK action
+    # sudo triggers the bash/sudo MEDIUM rule
+    ask_result = ask_engine.check("exec", {"command": "sudo apt install something"})
+    _assert(
+        ask_result.action == Action.ASK,
+        f"sudo (medium risk) → {ask_result.action.value}",
+    )
+    _assert(
+        ask_result.rule_id != "",
+        f"rule_id set: {ask_result.rule_id}",
+    )
+
+
 # ── Summary ───────────────────────────────────────────────────
 
 print(f"\n{'='*50}")

@@ -37,6 +37,7 @@ import yaml as _yaml  # noqa: F401 — needed for except clause
 from nanobot.governance.permissions import GovernanceDenied, PermissionEngine
 from nanobot.governance.constitution import Constitution
 from nanobot.governance.audit import AuditLogger
+from nanobot.governance.risk import GovernanceAction
 
 
 @HookRegistry.register("governance")
@@ -115,6 +116,16 @@ class GovernanceHook(ConfigurableHook):
                 decision.risk_level.value,
             )
             raise GovernanceDenied(decision)
+        elif decision.action == GovernanceAction.ASK:
+            # ASK = elevated risk, log for visibility but allow with warning
+            # Future: could pause for human approval via Telegram prompt
+            logger.warning(
+                "Governance ASK (allowed with warning): tool={} risk={} rule={}",
+                tc_ctx.tool_name,
+                decision.risk_level.value,
+                decision.rule_id,
+            )
+            tc_ctx.arguments["_governance_ask"] = decision.rule_id
         elif decision.risk_level.value in ("medium", "high"):
             logger.info(
                 "Governance allow (elevated risk): tool={} risk={} rule={}",

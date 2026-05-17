@@ -213,9 +213,14 @@ class PermissionEngine:
                 input_hash=input_hash,
             )
         if risk_action_str == "ask":
-            # "ask" is informational for now — log it but allow
-            # Future: could pause for human approval
-            pass
+            return GovernanceDecision(
+                action=GovernanceAction.ASK,
+                risk_level=risk_level,
+                rule_id=rule_id or f"risk/{risk_level.value}",
+                reason=reason or f"Risk level {risk_level.value} requires confirmation",
+                tool_name=tool_name,
+                input_hash=input_hash,
+            )
 
         # --- Priority 3: Constitution allow_patterns ---
         allow_patterns = self._allow_cache.get(norm_tool, [])
