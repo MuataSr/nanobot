@@ -12,7 +12,7 @@ from typing import Any, Callable
 
 from loguru import logger
 
-from nanobot.agent.hook import AgentHook, AgentHookContext
+from nanobot.agent.hook import AgentHook, AgentHookContext, ToolCallContext
 from nanobot.agent.tools.registry import ToolRegistry
 from nanobot.providers.base import LLMProvider, LLMResponse, ToolCallRequest
 from nanobot.utils.file_edit_events import (
@@ -363,6 +363,7 @@ class AgentRunner:
                     response.tool_calls,
                     external_lookup_counts,
                     workspace_violation_counts,
+                    hook=hook,
                 )
                 tool_events.extend(new_events)
                 context.tool_results = list(results)
@@ -804,6 +805,7 @@ class AgentRunner:
         tool_calls: list[ToolCallRequest],
         external_lookup_counts: dict[str, int],
         workspace_violation_counts: dict[str, int],
+        hook: AgentHook | None = None,
     ) -> tuple[list[Any], list[dict[str, str]], BaseException | None]:
         batches = self._partition_tool_batches(spec, tool_calls)
         tool_results: list[tuple[Any, dict[str, str], BaseException | None]] = []
@@ -812,6 +814,7 @@ class AgentRunner:
                 batch_results = await asyncio.gather(*(
                     self._run_tool(
                         spec, tool_call, external_lookup_counts, workspace_violation_counts,
+                        hook=hook,
                     )
                     for tool_call in batch
                 ))
@@ -821,6 +824,7 @@ class AgentRunner:
                 for tool_call in batch:
                     result = await self._run_tool(
                         spec, tool_call, external_lookup_counts, workspace_violation_counts,
+                        hook=hook,
                     )
                     tool_results.append(result)
                     batch_results.append(result)
@@ -841,6 +845,7 @@ class AgentRunner:
         tool_call: ToolCallRequest,
         external_lookup_counts: dict[str, int],
         workspace_violation_counts: dict[str, int],
+        hook: AgentHook | None = None,
     ) -> tuple[Any, dict[str, str], BaseException | None]:
         hint = "\n\n[Analyze the error above and try a different approach.]"
         lookup_error = repeated_external_lookup_error(
@@ -906,6 +911,32 @@ class AgentRunner:
                     params if isinstance(params, dict) else None,
                 ) for file_edit_tracker in file_edit_trackers],
             )
+
+        # Per-tool before hook (may raise GovernanceDenied)
+        if hook is not None:
+            tc_ctx = ToolCallContext(tool_name=tool_call.name, arguments=tool_call.arguments)
+            try:
+                await hook.before_tool_call(tc_ctx)
+            except Exception as gov_exc:
+                # GovernanceDenied (or any hook denial) → return as tool error
+                # so the model sees the denial reason and doesn't retry.
+                from nanobot.governance.permissions import GovernanceDenied as _GovDenied
+                if isinstance(gov_exc, _GovDenied):
+                    reason = gov_exc.decision.reason
+                    rule = gov_exc.decision.rule_id
+                    risk = gov_exc.decision.risk_level.value
+                    denial_msg = (
+                        f"Blocked by governance policy: {reason} "
+                        f"(rule={rule}, risk={risk}). "
+                        f"Choose a different approach — do not retry the same command."
+                    )
+                    event = {
+                        "name": tool_call.name,
+                        "status": "governance_denied",
+                        "detail": denial_msg[:120],
+                    }
+                    return denial_msg, event, None
+                raise
         try:
             if tool is not None:
                 result = await tool.execute(**params)
@@ -984,6 +1015,12 @@ class AgentRunner:
             detail = "(empty)"
         elif len(detail) > 120:
             detail = detail[:120] + "..."
+
+        # Per-tool after hook
+        if hook is not None:
+            tc_ctx = ToolCallContext(tool_name=tool_call.name, arguments=tool_call.arguments)
+            result = await hook.after_tool_call(tc_ctx, result)
+
         return result, {"name": tool_call.name, "status": "ok", "detail": detail}, None
 
     # SSRF is a hard security block at the tool boundary, but the agent turn

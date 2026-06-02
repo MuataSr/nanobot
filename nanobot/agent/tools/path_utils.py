@@ -1,12 +1,30 @@
 """Shared path helpers for workspace-scoped tools."""
 
-from pathlib import Path
+from pathlib import Path, PurePath
 
 from nanobot.config.paths import get_media_dir
 from nanobot.security.workspace_policy import (
     is_path_within,
     resolve_allowed_path,
 )
+
+# Glob patterns for sensitive system files (SSH keys, credentials, etc.).
+SENSITIVE_PATTERNS: list[str] = [
+    "/etc/shadow",
+    "/etc/passwd",
+    "/etc/ssh/*",
+    "/etc/gshadow",
+    "/root/.ssh/*",
+    "/home/*/.ssh/*",
+    "*.pem",
+    "*.key",
+]
+
+
+def is_sensitive_path(resolved_path: Path) -> bool:
+    """Return True if *resolved_path* matches any SENSITIVE_PATTERNS entry."""
+    pure = PurePath(resolved_path)
+    return any(pure.match(pat) for pat in SENSITIVE_PATTERNS)
 
 
 def is_under(path: Path, directory: Path) -> bool:

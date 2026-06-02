@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -28,6 +29,14 @@ class AgentHookContext:
     error: str | None = None
 
 
+@dataclass(slots=True)
+class ToolCallContext:
+    """Per-tool-call context for ``before_tool_call`` / ``after_tool_call``."""
+
+    tool_name: str
+    arguments: dict[str, Any]
+
+
 class AgentHook:
     """Minimal lifecycle surface for shared runner customization."""
 
@@ -48,6 +57,12 @@ class AgentHook:
 
     async def before_execute_tools(self, context: AgentHookContext) -> None:
         pass
+
+    async def before_tool_call(self, tc_ctx: ToolCallContext) -> None:
+        pass
+
+    async def after_tool_call(self, tc_ctx: ToolCallContext, result: Any) -> Any:
+        return result
 
     async def emit_reasoning(self, reasoning_content: str | None) -> None:
         pass
@@ -107,6 +122,14 @@ class CompositeHook(AgentHook):
     async def before_execute_tools(self, context: AgentHookContext) -> None:
         await self._for_each_hook_safe("before_execute_tools", context)
 
+    async def before_tool_call(self, tc_ctx: ToolCallContext) -> None:
+        await self._for_each_hook_safe("before_tool_call", tc_ctx)
+
+    async def after_tool_call(self, tc_ctx: ToolCallContext, result: Any) -> Any:
+        for h in self._hooks:
+            result = await h.after_tool_call(tc_ctx, result)
+        return result
+
     async def emit_reasoning(self, reasoning_content: str | None) -> None:
         await self._for_each_hook_safe("emit_reasoning", reasoning_content)
 
@@ -139,3 +162,49 @@ class SDKCaptureHook(AgentHook):
         for call in context.tool_calls:
             self.tools_used.append(call.name)
         self.messages = list(context.messages)
+
+
+class ConfigurableHook(AgentHook):
+    """Base class for hooks that accept config from config.json.
+
+    Subclass this to create config-driven hooks. Override ``__init__`` to accept
+    a ``config: dict[str, Any]`` parameter alongside the standard hook args.
+    """
+
+    def __init__(self, config: dict[str, Any] | None = None, **kwargs: Any) -> None:
+        super().__init__(**kwargs)
+        self.config = config or {}
+
+
+class HookRegistry:
+    """Registry for named hooks, loaded from config and composed at startup."""
+
+    _registry: dict[str, type[ConfigurableHook]] = {}
+
+    @classmethod
+    def register(cls, name: str) -> Callable[[type[ConfigurableHook]], type[ConfigurableHook]]:
+        """Decorator to register a ConfigurableHook subclass under a name."""
+        def decorator(hook_cls: type[ConfigurableHook]) -> type[ConfigurableHook]:
+            cls._registry[name] = hook_cls
+            return hook_cls
+        return decorator
+
+    @classmethod
+    def build(cls, enabled: list[str], config: dict[str, Any]) -> AgentHook | None:
+        """Build a CompositeHook from enabled hook names + config dict.
+
+        Returns None if no enabled hooks resolve to registered classes.
+        """
+        hooks: list[AgentHook] = []
+        for name in enabled:
+            hook_cls = cls._registry.get(name)
+            if hook_cls is None:
+                logger.warning("Hook '{}' not found in registry — skipping", name)
+                continue
+            hook_cfg = config.get(name, {})
+            hooks.append(hook_cls(config=hook_cfg))
+        if not hooks:
+            return None
+        if len(hooks) == 1:
+            return hooks[0]
+        return CompositeHook(hooks)

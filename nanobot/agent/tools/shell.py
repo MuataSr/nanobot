@@ -263,6 +263,39 @@ class ExecTool(Tool):
         if yield_time_ms is not None:
             return await self._execute_session(prepared, yield_time_ms, max_output_chars)
 
+        # Sensitive-path protection: warn on access to system credential files.
+        from nanobot.agent.tools.path_utils import is_sensitive_path
+        try:
+            if is_sensitive_path(Path(cwd).resolve()):
+                logger.warning("Sensitive path access: {}", cwd)
+        except Exception:
+            pass
+
+        guard_error = self._guard_command(command, cwd)
+        if guard_error:
+            return guard_error
+
+        if self.sandbox:
+            if _IS_WINDOWS:
+                logger.warning(
+                    "Sandbox '{}' is not supported on Windows; running unsandboxed",
+                    self.sandbox,
+                )
+            else:
+                workspace = self.working_dir or cwd
+                command = wrap_command(self.sandbox, command, workspace, cwd)
+                cwd = str(Path(workspace).resolve())
+
+        effective_timeout = min(timeout or self.timeout, self._MAX_TIMEOUT)
+        env = self._build_env()
+
+        if self.path_append:
+            if _IS_WINDOWS:
+                env["PATH"] = env.get("PATH", "") + os.pathsep + self.path_append
+            else:
+                env["NANOBOT_PATH_APPEND"] = self.path_append
+                command = f'export PATH="$PATH{os.pathsep}$NANOBOT_PATH_APPEND"; {command}'
+
         try:
             process = await self._spawn(
                 prepared.command,

@@ -101,3 +101,4 @@ temp/
 *.tmp
 exp/
 .playwright-mcp/
+nanobot.env/

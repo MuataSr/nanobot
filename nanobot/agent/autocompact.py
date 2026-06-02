@@ -19,10 +19,11 @@ class AutoCompact:
     _INTERNAL_SESSION_PREFIXES = ("dream:",)
 
     def __init__(self, sessions: SessionManager, consolidator: Consolidator,
-                 session_ttl_minutes: int = 0):
+                 session_ttl_minutes: int = 0, token_threshold: int = 0):
         self.sessions = sessions
         self.consolidator = consolidator
         self._ttl = session_ttl_minutes
+        self._token_threshold = token_threshold
         self._archiving: set[str] = set()
         self._summaries: dict[str, tuple[str, datetime]] = {}
 
@@ -42,6 +43,35 @@ class AutoCompact:
     def _is_internal_session(cls, key: str) -> bool:
         return key.startswith(cls._INTERNAL_SESSION_PREFIXES)
 
+    def _estimate_tokens(self, session: Session) -> int:
+        """Rough token estimate: chars / 4 for English text."""
+        total_chars = sum(
+            len(msg.get("content", "")) if isinstance(msg.get("content"), str) else 0
+            for msg in session.messages
+        )
+        return total_chars // 4
+
+    def _split_unconsolidated(
+        self, session: Session,
+    ) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+        """Split live session tail into archiveable prefix and retained recent suffix."""
+        tail = list(session.messages[session.last_consolidated:])
+        if not tail:
+            return [], []
+
+        probe = Session(
+            key=session.key,
+            messages=tail.copy(),
+            created_at=session.created_at,
+            updated_at=session.updated_at,
+            metadata={},
+            last_consolidated=0,
+        )
+        probe.retain_recent_legal_suffix(self._RECENT_SUFFIX_MESSAGES)
+        kept = probe.messages
+        cut = len(tail) - len(kept)
+        return tail[:cut], kept
+
     def check_expired(self, schedule_background: Callable[[Coroutine], None],
                       active_session_keys: Collection[str] = ()) -> None:
         """Schedule archival for idle sessions, skipping those with in-flight agent tasks."""
@@ -52,7 +82,14 @@ class AutoCompact:
                 continue
             if key in active_session_keys:
                 continue
-            if self._is_expired(info.get("updated_at"), now):
+            session = self.sessions.get_or_create(key)
+            token_est = self._estimate_tokens(session)
+            ttl_expired = self._is_expired(info.get("updated_at"), now)
+            token_exceeded = (
+                self._token_threshold > 0
+                and token_est >= self._token_threshold
+            )
+            if ttl_expired or token_exceeded:
                 self._archiving.add(key)
                 schedule_background(self._archive(key))
 

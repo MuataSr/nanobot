@@ -18,7 +18,7 @@ from nanobot.agent import context as agent_context
 from nanobot.agent import model_presets as preset_helpers
 from nanobot.agent.autocompact import AutoCompact
 from nanobot.agent.context import ContextBuilder
-from nanobot.agent.hook import AgentHook, CompositeHook
+from nanobot.agent.hook import AgentHook, CompositeHook, HookRegistry
 from nanobot.agent.memory import Consolidator
 from nanobot.agent.progress_hook import AgentProgressHook
 from nanobot.agent.runner import _MAX_INJECTIONS_PER_TURN, AgentRunner, AgentRunSpec
@@ -357,6 +357,14 @@ class AgentLoop:
             config,
             provider_snapshot_loader,
         )
+        # Build hooks from enabled_hooks config
+        hooks = extra.pop("hooks", None)
+        if hooks is None:
+            hooks = HookRegistry.build(
+                defaults.hooks.enabled_hooks,
+                defaults.hooks.config if hasattr(defaults.hooks, "config") else {},
+            )
+
         return cls(
             bus=bus,
             provider=provider,
@@ -383,6 +391,7 @@ class AgentLoop:
             model_preset=defaults.model_preset,
             provider_snapshot_loader=provider_snapshot_loader,
             preset_snapshot_loader=preset_snapshot_loader,
+            hooks=hooks,
             **extra,
         )
 

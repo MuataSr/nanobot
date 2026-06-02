@@ -14,6 +14,7 @@ from nanobot.agent.hook import AgentHook, AgentHookContext
 from nanobot.agent.runner import AgentRunner, AgentRunSpec
 from nanobot.agent.tools.context import ToolContext
 from nanobot.agent.tools.file_state import FileStates
+from nanobot.agent.team_state import TeamState
 from nanobot.agent.tools.loader import ToolLoader
 from nanobot.agent.tools.registry import ToolRegistry
 from nanobot.security.workspace_access import (
@@ -112,6 +113,7 @@ class SubagentManager:
         self._running_tasks: dict[str, asyncio.Task[None]] = {}
         self._task_statuses: dict[str, SubagentStatus] = {}
         self._session_tasks: dict[str, set[str]] = {}  # session_key -> {task_id, ...}
+        self._team_state = TeamState(workspace)
 
     def _subagent_tools_config(self) -> ToolsConfig:
         """Build a ToolsConfig scoped for subagent use."""
@@ -146,6 +148,18 @@ class SubagentManager:
         self.provider = provider
         self.model = model
         self.runner.provider = provider
+
+    def create_team(self, name: str, config: dict[str, Any] | None = None) -> dict[str, Any]:
+        return self._team_state.create_team(name, config)
+
+    def list_teams(self) -> list[dict[str, Any]]:
+        return self._team_state.list_teams()
+
+    def archive_team(self, name: str) -> None:
+        self._team_state.archive_team(name)
+
+    def get_team(self, name: str) -> dict[str, Any] | None:
+        return self._team_state.get_team(name)
 
     async def spawn(
         self,
