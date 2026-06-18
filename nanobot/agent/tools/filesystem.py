@@ -181,7 +181,10 @@ class ReadFileTool(_FsTool):
             "Use find_files/list_dir first when the path is uncertain. "
             "Read the relevant range before editing so replacements or patches "
             "are based on current content. "
-            "Use offset and limit for large text files. "
+            "Use offset and limit for large text files.\n"
+            "\n"
+            "Use when: user asks to read, view, check, or examine a file's contents. "
+            "Example: \"Read the config file\" → read_file(path=\"config.json\")"
             "Use force=true to re-read content even if unchanged. "
             "Reads exceeding ~128K chars are truncated."
         )
@@ -410,7 +413,10 @@ class WriteFileTool(_FsTool):
             "Create a new file or intentionally replace an entire file with "
             "the provided content. Overwrites existing files and creates parent "
             "directories as needed. For code changes or partial edits, prefer "
-            "apply_patch; use edit_file only for small exact replacements."
+            "apply_patch; use edit_file only for small exact replacements.\n"
+            "\n"
+            "Use when: user asks to save, write, create, or overwrite a file. "
+            "Example: \"Save this to notes.txt\" → write_file(path=\"notes.txt\", content=\"...\")"
         )
 
     async def execute(self, path: str | None = None, content: str | None = None, **kwargs: Any) -> str:
@@ -968,7 +974,10 @@ class ListDirTool(_FsTool):
         return (
             "List the contents of a directory. "
             "Set recursive=true to explore nested structure. "
-            "Common noise directories (.git, node_modules, __pycache__, etc.) are auto-ignored."
+            "Common noise directories (.git, node_modules, __pycache__, etc.) are auto-ignored.\n"
+            "\n"
+            "Use when: user asks what's in a folder, to browse, or see directory structure. "
+            "Example: \"What's in the projects folder?\" → list_dir(path=\"projects/\")"
         )
 
     @property

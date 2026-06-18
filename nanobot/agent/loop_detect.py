@@ -1,9 +1,15 @@
 """Loop detection hook — catches agents repeating identical tool-call patterns.
 
-Tracks consecutive identical tool-call *signatures* across iterations.  At
-``warn_at`` repeats the agent receives an in-context nudge; at ``halt_at``
-repeats a stronger message is injected that steers the model toward a final
-text response (ending the tool-call loop naturally).
+Tracks two patterns across iterations:
+
+1. **Identical signatures** — same tool names + same arguments.  At
+   ``warn_at`` repeats the agent receives an in-context nudge; at ``halt_at``
+   a stronger message steers the model toward a final text response.
+
+2. **Same-tool hammering** — the *same single tool* called consecutively
+   regardless of arguments.  Catches agents that vary search queries slightly
+   each call to evade the identical-signature check.  Governed by
+   ``same_tool_warn_at`` and ``same_tool_halt_at``.
 
 No modifications to the runner are required — the hook works entirely
 through the existing ``before_execute_tools`` and ``after_iteration`` hook
@@ -70,6 +76,18 @@ _HALT_MESSAGE = (
     "you have so far, or ask them for guidance."
 )
 
+_SAME_TOOL_WARN_MESSAGE = (
+    "⚠️ Tool hammering detected — you have called '{tool}' {count} times "
+    "in a row. Stop calling this tool and work with the results you have, "
+    "or try a fundamentally different approach."
+)
+
+_SAME_TOOL_HALT_MESSAGE = (
+    "🛑 Tool hammering halt — '{tool}' has been called {count} consecutive "
+    "times. Do NOT call any more tools. Respond directly to the user with "
+    "what you have, or ask them for guidance."
+)
+
 
 # ── Hook ──────────────────────────────────────────────────────────────
 
@@ -85,19 +103,40 @@ class LoopDetectHook(AgentHook):
         Consecutive identical signatures before a halt message is injected
         that explicitly tells the model to stop calling tools.
         Default ``5``.  Must be greater than *warn_at*.
+    same_tool_warn_at:
+        Consecutive calls of the *same single tool* (any args) before
+        a warning.  Default ``4``.
+    same_tool_halt_at:
+        Consecutive calls of the *same single tool* before a halt message.
+        Default ``6``.  Must be greater than *same_tool_warn_at*.
     """
 
-    __slots__ = ("_warn_at", "_halt_at", "_last_sig", "_count", "_halted")
+    __slots__ = (
+        "_warn_at", "_halt_at", "_last_sig", "_count", "_halted",
+        "_same_tool_warn", "_same_tool_halt", "_last_tool_name",
+        "_same_tool_count", "_same_tool_halted",
+    )
 
-    def __init__(self, *, warn_at: int = 3, halt_at: int = 5) -> None:
+    def __init__(self, *, warn_at: int = 3, halt_at: int = 5,
+                 same_tool_warn_at: int = 4, same_tool_halt_at: int = 6) -> None:
         super().__init__()
         if halt_at <= warn_at:
             raise ValueError(f"halt_at ({halt_at}) must be > warn_at ({warn_at})")
+        if same_tool_halt_at <= same_tool_warn_at:
+            raise ValueError(
+                f"same_tool_halt_at ({same_tool_halt_at}) must be > "
+                f"same_tool_warn_at ({same_tool_warn_at})"
+            )
         self._warn_at = warn_at
         self._halt_at = halt_at
         self._last_sig: str | None = None
         self._count: int = 0
         self._halted: bool = False
+        self._same_tool_warn = same_tool_warn_at
+        self._same_tool_halt = same_tool_halt_at
+        self._last_tool_name: str | None = None
+        self._same_tool_count: int = 0
+        self._same_tool_halted: bool = False
 
     # ── Hook points ───────────────────────────────────────────────
 
@@ -124,14 +163,64 @@ class LoopDetectHook(AgentHook):
             self._inject(context, _HALT_MESSAGE.format(count=self._count))
             self._halted = True
 
+        # ── Same-tool hammering detection ───────────────────────────
+        tool_names = {tc.name for tc in context.tool_calls}
+        if len(tool_names) == 1:
+            tool_name = next(iter(tool_names))
+            if tool_name == self._last_tool_name:
+                self._same_tool_count += 1
+            else:
+                self._last_tool_name = tool_name
+                self._same_tool_count = 1
+
+            if self._same_tool_count == self._same_tool_warn and not self._same_tool_halted:
+                logger.warning(
+                    "LoopDetect: same-tool hammering: '%s' x%s",
+                    tool_name, self._same_tool_count,
+                )
+                self._inject(
+                    context,
+                    _SAME_TOOL_WARN_MESSAGE.format(
+                        tool=tool_name, count=self._same_tool_count,
+                    ),
+                )
+
+            elif self._same_tool_count >= self._same_tool_halt and not self._same_tool_halted:
+                logger.warning(
+                    "LoopDetect: same-tool halt: '%s' x%s",
+                    tool_name, self._same_tool_count,
+                )
+                self._inject(
+                    context,
+                    _SAME_TOOL_HALT_MESSAGE.format(
+                        tool=tool_name, count=self._same_tool_count,
+                    ),
+                )
+                self._same_tool_halted = True
+        else:
+            # Multiple different tools = not hammering, reset
+            self._last_tool_name = None
+            self._same_tool_count = 0
+
     async def after_iteration(self, context: AgentHookContext) -> None:
         # Reset on successful progress (iteration ended with tool results
         # being appended, meaning the next iteration will proceed normally).
-        # We only keep the halt flag set once triggered.
+        # We only keep the halt flags set once triggered.
         if self._halted:
+            return
+        if self._same_tool_halted:
             return
 
     # ── Internal ──────────────────────────────────────────────────
+
+    def reset(self) -> None:
+        """Clear all loop state.  Call between independent sessions."""
+        self._last_sig = None
+        self._count = 0
+        self._halted = False
+        self._last_tool_name = None
+        self._same_tool_count = 0
+        self._same_tool_halted = False
 
     @staticmethod
     def _inject(context: AgentHookContext, text: str) -> None:

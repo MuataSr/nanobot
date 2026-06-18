@@ -229,10 +229,14 @@ class WebSearchTool(Tool):
 
     name = "web_search"
     description = (
-        "Search the web. Returns titles, URLs, and snippets. "
+        "Search the web for current information. Returns titles, URLs, and snippets. "
         "count defaults to 5 (max 10). "
         "Some providers support timeRange, authLevel, and queryRewrite. "
-        "Use web_fetch to read a specific page in full."
+        "Use web_fetch to read a specific page in full.\n"
+        "\n"
+        "Use when: user asks about current events, recent news, weather, live data, "
+        "prices, facts you're uncertain about, or anything requiring up-to-date information. "
+        "Example: \"What's the weather in Tokyo?\" → web_search(query=\"Tokyo weather today\")"
     )
 
     config_key = "web"
@@ -688,7 +692,11 @@ class WebFetchTool(Tool):
     description = (
         "Fetch a URL and extract readable content (HTML → markdown/text). "
         "Output is capped at maxChars (default 50 000). "
-        "Works for most web pages and docs; may fail on login-walled or JS-heavy sites."
+        "Works for most web pages and docs; may fail on login-walled or JS-heavy sites.\n"
+        "\n"
+        "Use when: user shares a URL and wants its content, or after web_search to read "
+        "a specific result page in detail. "
+        "Example: \"Read this article: https://...\" → web_fetch(url=\"https://...\")"
     )
 
     config_key = "web"

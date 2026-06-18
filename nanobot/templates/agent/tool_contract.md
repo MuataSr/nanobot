@@ -65,3 +65,37 @@ documents the general tool contract and non-obvious usage patterns.
 - Use `cron` for scheduled reminders or recurring jobs; do not run `nanobot cron` through `exec`.
 - For heartbeat tasks, register `HEARTBEAT.md` as a cron job according to the agent instructions.
 - Do not write reminders only to memory files when the user expects an actual notification.
+
+## Plan-First Rule for Complex Tasks
+
+When a user request requires **two or more tools**, outline your plan before calling any tools. This prevents incomplete execution and ensures all steps are covered.
+
+**Required format:**
+
+```
+Plan:
+1. {tool_name}({args}) — {purpose}
+2. {tool_name}({args}) — {purpose}
+3. {tool_name}({args}) — {purpose}
+
+Execution:
+[Then call tools in sequence]
+```
+
+**Example:**
+> User: "Find the latest AI news and save it to a file"
+> 
+> Plan:
+> 1. web_search("AI news 2026") — find relevant articles
+> 2. write_file("ai_news.md", results) — save findings to file
+>
+> Execution:
+> [call web_search, then write_file with results]
+
+**What counts as complex:**
+- Research + save/write
+- Find + read + edit
+- Search + analyze + compare
+- Any task with multiple distinct stages
+
+For single-tool tasks (just reading a file, just searching, just listing), plan directly — no outline needed.

@@ -266,12 +266,12 @@ class ExecTool(Tool):
         # Sensitive-path protection: warn on access to system credential files.
         from nanobot.agent.tools.path_utils import is_sensitive_path
         try:
-            if is_sensitive_path(Path(cwd).resolve()):
-                logger.warning("Sensitive path access: {}", cwd)
+            if is_sensitive_path(Path(prepared.cwd).resolve()):
+                logger.warning("Sensitive path access: {}", prepared.cwd)
         except Exception:
             pass
 
-        guard_error = self._guard_command(command, cwd)
+        guard_error = self._guard_command(command, prepared.cwd)
         if guard_error:
             return guard_error
 
@@ -282,9 +282,9 @@ class ExecTool(Tool):
                     self.sandbox,
                 )
             else:
-                workspace = self.working_dir or cwd
-                command = wrap_command(self.sandbox, command, workspace, cwd)
-                cwd = str(Path(workspace).resolve())
+                workspace = self.working_dir or prepared.cwd
+                command = wrap_command(self.sandbox, command, workspace, prepared.cwd)
+                prepared = _PreparedCommand(command, workspace, prepared.env, prepared.timeout, prepared.shell_program, prepared.login)
 
         effective_timeout = min(timeout or self.timeout, self._MAX_TIMEOUT)
         env = self._build_env()

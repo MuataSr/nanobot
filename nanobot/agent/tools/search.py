@@ -134,7 +134,10 @@ class FindFilesTool(_SearchTool):
             "Use this before read_file when you need to locate files, and "
             "prefer it over shell find/ls for ordinary workspace discovery. "
             "Returns workspace-relative paths and skips common dependency/build "
-            "directories."
+            "directories.\n"
+            "\n"
+            "Use when: user asks where a file is, to locate files, or to explore a directory. "
+            "Example: \"Where are the test files?\" → find_files(glob=\"*test*\")"
         )
 
     @property

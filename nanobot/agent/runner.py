@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import inspect
+import json
 import os
 from contextlib import suppress
 from dataclasses import dataclass, field
@@ -937,6 +938,27 @@ class AgentRunner:
                     }
                     return denial_msg, event, None
                 raise
+        # ── Parameter validation ──
+        if tool is not None and isinstance(params, dict):
+            validation_errors = tool.validate_params(params)
+            if validation_errors:
+                schema_str = json.dumps(tool.parameters or {}, indent=2)
+                errors_str = "\n".join(f"  - {e}" for e in validation_errors)
+                validation_msg = (
+                    f"Parameter validation failed for {tool_call.name}:\n"
+                    f"{errors_str}\n\n"
+                    f"Expected parameters:\n{schema_str}\n\n"
+                    f"Please retry with corrected parameters."
+                )
+                event = {
+                    "name": tool_call.name,
+                    "status": "error",
+                    "detail": f"param validation: {validation_errors[0][:120]}",
+                }
+                if spec.fail_on_tool_error:
+                    return validation_msg, event, RuntimeError(validation_msg)
+                return validation_msg, event, None
+        # ── End parameter validation ──
         try:
             if tool is not None:
                 result = await tool.execute(**params)
