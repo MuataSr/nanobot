@@ -17,16 +17,16 @@ from nanobot.agent.tools.file_state import FileStates
 from nanobot.agent.team_state import TeamState
 from nanobot.agent.tools.loader import ToolLoader
 from nanobot.agent.tools.registry import ToolRegistry
+from nanobot.bus.events import InboundMessage
+from nanobot.bus.queue import MessageBus
+from nanobot.config.schema import AgentDefaults, ToolsConfig
+from nanobot.providers.base import LLMProvider
 from nanobot.security.workspace_access import (
     WorkspaceScope,
     bind_workspace_scope,
     reset_workspace_scope,
     workspace_sandbox_status,
 )
-from nanobot.bus.events import InboundMessage
-from nanobot.bus.queue import MessageBus
-from nanobot.config.schema import AgentDefaults, ToolsConfig
-from nanobot.providers.base import LLMProvider
 from nanobot.utils.prompt_templates import render_template
 
 
@@ -120,6 +120,7 @@ class SubagentManager:
         return ToolsConfig(
             exec=self.tools_config.exec,
             web=self.tools_config.web,
+            file=self.tools_config.file,
             restrict_to_workspace=self.restrict_to_workspace,
         )
 
@@ -262,6 +263,7 @@ class SubagentManager:
                     max_tool_result_chars=self.max_tool_result_chars,
                     hook=_SubagentHook(task_id, status),
                     max_iterations_message="Task completed but no final response was generated.",
+                    finalize_on_max_iterations=False,
                     error_message=None,
                     fail_on_tool_error=True,
                     checkpoint_callback=_on_checkpoint,

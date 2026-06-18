@@ -6,8 +6,6 @@
 .env
 .web
 .orion
-nanobot-desktop/
-desktop/
 
 # Claude / AI assistant artifacts
 docs/superpowers/
@@ -102,3 +100,4 @@ temp/
 exp/
 .playwright-mcp/
 nanobot.env/
+bridge/node_modules/
