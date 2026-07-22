@@ -389,7 +389,8 @@ class ReadFileTool(_FsTool):
             if offset < 1:
                 offset = 1
             if offset > total:
-                return ToolResult.error(f"Error: offset {offset} is beyond end of file ({total} lines)")
+                last = max(1, total - (limit or self._DEFAULT_LIMIT) + 1)
+                offset = max(1, last or 1)
 
             start = offset - 1
             end = min(start + (limit or self._DEFAULT_LIMIT), total)

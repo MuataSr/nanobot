@@ -36,6 +36,9 @@ from nanobot.providers.openai_responses import (
     parse_response_output,
 )
 
+
+
+
 if TYPE_CHECKING:
     from openai import AsyncOpenAI as AsyncOpenAIType
 
@@ -877,8 +880,46 @@ class OpenAICompatProvider(LLMProvider):
                 kwargs.pop("reasoning_effort", None)
 
         if tools:
-            kwargs["tools"] = tools
-            kwargs["tool_choice"] = tool_choice or "auto"
+            spec = self._spec
+            if spec and getattr(spec, 'supports_native_tools', False):
+                # Model supports native OpenAI tool calling - pass tools directly
+                # via the standard 'tools' parameter. The API handles function
+                # call generation natively, no XML injection needed.
+                kwargs["tools"] = tools
+                kwargs["tool_choice"] = tool_choice or "auto"
+            else:
+                # llama-server with --no-jinja rejects the tools parameter.
+                # Embed tool descriptions in system message using OLMo <functions> format.
+                # Grammar-less approach: model outputs <function_calls>name(params)</function_calls>
+                tools_json = []
+                for tool in tools:
+                    if tool.get("type") == "function":
+                        func = tool.get("function", {})
+                        param_schema = func.get("parameters", {})
+                        tools_json.append({
+                            "type": "function",
+                            "function": {
+                                "name": func.get("name"),
+                                "description": func.get("description", ""),
+                                "parameters": param_schema,
+                            }
+                        })
+                tools_json_str = json.dumps(tools_json)
+                functions_md = f"\n<functions>{tools_json_str}</functions>\n\nWhen you need to call a function, output exactly:\n<function_calls>\nfunction_name(param1=value1, param2=value2)\n</function_calls>\nDo NOT output anything else. Only the <function_calls> block."
+                # Skip if already embedded (tools already described for this session)
+                already_has_functions = any(
+                    "<functions>" in (msg.get("content") or "")
+                    for msg in kwargs["messages"]
+                    if msg.get("role") == "system"
+                )
+                if not already_has_functions:
+                    for msg in kwargs["messages"]:
+                        if msg.get("role") == "system":
+                            msg["content"] += functions_md
+                            break
+                    else:
+                        kwargs["messages"].insert(0, {"role": "system", "content": functions_md.strip()})
+                # Do NOT pass tools to the server
 
         # Backfill reasoning_content="" on assistants missing it: DeepSeek
         # thinking mode rejects history otherwise (#3554, #3584); "" reads
@@ -1261,6 +1302,37 @@ class OpenAICompatProvider(LLMProvider):
             if not parsed_tool_calls:
                 content, parsed_tool_calls = _extract_text_tool_calls(content)
 
+            # Fallback: parse <function_calls> from model output text (OLMo format)
+            if not parsed_tool_calls and content:
+                import re
+                fc_block = re.search(r'<function_calls>(.*?)</function_calls>', content, re.DOTALL)
+                if fc_block:
+                    fc_text = fc_block.group(1).strip()
+                    for line in fc_text.split('\n'):
+                        line = line.strip()
+                        if not line:
+                            continue
+                        func_match = re.match(r'(\w+)\((.+)\)', line, re.DOTALL)
+                        if func_match:
+                            name = func_match.group(1)
+                            args_str = func_match.group(2)
+                            pairs = re.findall(r"""(\w+)\s*=\s*('[^']*'|"[^"]*"|\d+\.?\d*|true|false|null)""", args_str)
+                            args = {}
+                            for key, val in pairs:
+                                try:
+                                    parsed = json.loads(val.replace("'", '"'))
+                                except (json.JSONDecodeError, ValueError):
+                                    parsed = val.strip("'\"")
+                                args[key] = parsed
+                            parsed_tool_calls.append(ToolCallRequest(
+                                id=_short_tool_id(),
+                                name=name,
+                                arguments=args,
+                            ))
+                    if parsed_tool_calls:
+                        content = content.replace(fc_block.group(0), "").strip()
+                        finish_reason = "tool_calls"
+
             return LLMResponse(
                 content=content,
                 tool_calls=parsed_tool_calls,
@@ -1307,6 +1379,41 @@ class OpenAICompatProvider(LLMProvider):
             ))
         if not tool_calls:
             content, tool_calls = _extract_text_tool_calls(content)
+
+        # Fallback: parse <function_calls> from model output text
+        # (OLMo format: function_name(param1=value1, param2=value2))
+        if not tool_calls and content:
+            import re
+            fc_block = re.search(r'<function_calls>(.*?)</function_calls>', content, re.DOTALL)
+            if fc_block:
+                fc_text = fc_block.group(1).strip()
+                # Parse each line: function_name(key1=val1, key2=val2)
+                for line in fc_text.split('\n'):
+                    line = line.strip()
+                    if not line:
+                        continue
+                    func_match = re.match(r'(\w+)\((.+)\)', line, re.DOTALL)
+                    if func_match:
+                        name = func_match.group(1)
+                        args_str = func_match.group(2)
+                        # Parse key=value pairs
+                        args = {}
+                        # Split by comma, respecting quotes
+                        pairs = re.findall(r"""(\w+)\s*=\s*('[^']*'|"[^"]*"|\d+\.?\d*|true|false|null)""", args_str)
+                        for key, val in pairs:
+                            try:
+                                parsed = json.loads(val.replace("'", '"'))
+                            except (json.JSONDecodeError, ValueError):
+                                parsed = val.strip("'\"")
+                            args[key] = parsed
+                        tool_calls.append(ToolCallRequest(
+                            id=_short_tool_id(),
+                            name=name,
+                            arguments=args,
+                        ))
+                if tool_calls:
+                    content = content.replace(fc_block.group(0), "").strip()
+                    finish_reason = "tool_calls"
 
         reasoning_content = getattr(msg, "reasoning_content", None)
         if reasoning_content is None and getattr(msg, "reasoning", None):

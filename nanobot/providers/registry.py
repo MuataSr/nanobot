@@ -121,6 +121,8 @@ class ProviderSpec:
     # any extra fields; other providers (DeepSeek) require this key on the
     # wire to keep thinking-mode history intact.
     strip_history_reasoning_content: bool = False
+    # When True, pass tools via native OpenAI "tools" parameter instead of XML injection.
+    supports_native_tools: bool = False
 
     @property
     def label(self) -> str:
@@ -304,6 +306,7 @@ PROVIDERS: tuple[ProviderSpec, ...] = (
         detect_by_base_keyword="volces",
         default_api_base="https://ark.cn-beijing.volces.com/api/v3",
         thinking_style="thinking_type",
+        supports_native_tools=True,
         supports_max_completion_tokens=True,
     ),
 
@@ -318,6 +321,7 @@ PROVIDERS: tuple[ProviderSpec, ...] = (
         default_api_base="https://ark.cn-beijing.volces.com/api/coding/v3",
         strip_model_prefix=True,
         thinking_style="thinking_type",
+        supports_native_tools=True,
         supports_max_completion_tokens=True,
     ),
 
@@ -333,6 +337,7 @@ PROVIDERS: tuple[ProviderSpec, ...] = (
         default_api_base="https://ark.ap-southeast.bytepluses.com/api/v3",
         strip_model_prefix=True,
         thinking_style="thinking_type",
+        supports_native_tools=True,
     ),
 
     # BytePlus Coding Plan: same key as byteplus
@@ -346,6 +351,7 @@ PROVIDERS: tuple[ProviderSpec, ...] = (
         default_api_base="https://ark.ap-southeast.bytepluses.com/api/coding/v3",
         strip_model_prefix=True,
         thinking_style="thinking_type",
+        supports_native_tools=True,
     ),
 
 
@@ -441,6 +447,7 @@ PROVIDERS: tuple[ProviderSpec, ...] = (
         backend="openai_compat",
         default_api_base="https://api.deepseek.com",
         thinking_style="thinking_type",
+        supports_native_tools=True,
     ),
     # Gemini: Google's OpenAI-compatible endpoint
     ProviderSpec(
@@ -575,6 +582,7 @@ PROVIDERS: tuple[ProviderSpec, ...] = (
         backend="openai_compat",
         default_api_base="https://api.xiaomimimo.com/v1",
         thinking_style="thinking_type",
+        supports_native_tools=True,
     ),
     # LongCat: OpenAI-compatible API
     ProviderSpec(

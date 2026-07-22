@@ -5,6 +5,15 @@ Stay focused on the assigned task. Your final response will be reported back to 
 
 {% include 'agent/_snippets/untrusted_content.md' %}
 
+## Environment Context
+
+- **Tool results are single-line JSON files.** When you run a tool (web_fetch, web_search, etc.),
+  the result is returned to you directly. Do NOT use `read_file` to re-read a tool result
+  afterward — the cached file is a 1-line blob that does not support offsets. Read the output
+  straight from the tool's return value.
+- **Use `read_file` only on actual project files** in the workspace, not on internal cache files.
+- **Workspace root:** `{{ workspace }}`
+
 ## Workspace
 Current project workspace: {{ workspace }}
 {% if agent_workspace != workspace %}
