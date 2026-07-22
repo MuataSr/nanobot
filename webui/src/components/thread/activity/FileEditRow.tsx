@@ -1,4 +1,8 @@
-import { AlertCircle, CheckCircle2, CircleDashed } from "lucide-react";
+import {
+  AlertCircle,
+  CheckCircle2,
+  CircleDashed,
+} from "lucide-react";
 import { useTranslation } from "react-i18next";
 
 import { FileReferenceChip } from "@/components/FileReferenceChip";
@@ -31,7 +35,7 @@ export function FileEditGroup({
 }) {
   if (edits.length === 0) return null;
   return (
-    <ul className="space-y-1">
+    <>
       {edits.map((edit) => (
         <FileEditRow
           key={edit.key}
@@ -39,7 +43,7 @@ export function FileEditGroup({
           onOpenFilePreview={onOpenFilePreview}
         />
       ))}
-    </ul>
+    </>
   );
 }
 
@@ -53,12 +57,8 @@ function FileEditRow({
   const { t } = useTranslation();
   const editing = edit.status === "editing";
   const failed = edit.status === "error";
+  const action = fileEditAction(edit, editing, failed);
   const hasCountedDiff = !failed && !edit.binary && hasVisibleDiffStats(edit);
-  const rawFailureDetail = failed ? cleanFileEditError(edit.error) : "";
-  const failureDetail = failed
-    ? formatFileEditError(edit.error)
-      || t("message.fileEditFailedFallback", { defaultValue: "File change was not applied." })
-    : "";
   const statusIcon = failed ? (
     <AlertCircle className="h-3 w-3" aria-hidden />
   ) : editing ? (
@@ -66,9 +66,9 @@ function FileEditRow({
   ) : (
     <CheckCircle2 className="h-3 w-3" aria-hidden />
   );
+
   return (
     <ActivityStep
-      as="li"
       marker={(
         <span
           className={cn(
@@ -84,32 +84,26 @@ function FileEditRow({
       active={editing}
       tone={failed ? "error" : editing ? "active" : "success"}
       className="text-xs"
-      contentClassName={failed ? "min-w-0" : "grid grid-cols-[minmax(0,1fr)_auto] items-center gap-3"}
-      title={rawFailureDetail || edit.absolute_path || edit.path}
+      ariaLabel={edit.path ? `${action} ${edit.path}` : action}
       label={edit.pending && !edit.path
         ? t("message.fileEditPreparing", { defaultValue: "Preparing file edit…" })
         : (
-          <FileReferenceChip
-            path={edit.path}
-            tooltipPath={edit.absolute_path}
-            previewPath={edit.absolute_path || edit.path}
-            onOpen={onOpenFilePreview}
-            display="path"
-            active={editing}
-            className="min-w-0"
-            textClassName="text-[12px]"
-            testId="activity-file-reference"
-          />
+          <span className="flex min-w-0 items-center gap-1.5 overflow-hidden whitespace-nowrap">
+            <span className="shrink-0">{action}</span>
+            <FileReferenceChip
+              path={edit.path}
+              previewPath={edit.absolute_path || edit.path}
+              onOpen={onOpenFilePreview}
+              display="path"
+              active={editing}
+              className="min-w-0"
+              textClassName="truncate text-[12px]"
+              testId="activity-file-reference"
+            />
+            {hasCountedDiff ? <DiffPair added={edit.added} deleted={edit.deleted} /> : null}
+          </span>
         )}
-      detail={null}
-      aside={hasCountedDiff ? <DiffPair added={edit.added} deleted={edit.deleted} /> : null}
-    >
-      {failed ? (
-        <span className="block max-w-[42rem] truncate text-[11px] leading-4 text-destructive/75">
-          {failureDetail}
-        </span>
-      ) : null}
-    </ActivityStep>
+    />
   );
 }
 
@@ -117,28 +111,9 @@ export function hasVisibleDiffStats(edit: Pick<FileEditSummary, "added" | "delet
   return edit.added > 0 || edit.deleted > 0;
 }
 
-function cleanFileEditError(error?: string): string {
-  const firstLine = (error || "").replace(/\s+/g, " ").trim();
-  if (!firstLine) return "";
-  return firstLine
-    .replace(/^Error applying patch:\s*/i, "")
-    .replace(/^Error writing file:\s*/i, "")
-    .replace(/^Error editing file:\s*/i, "")
-    .replace(/^Error:\s*/i, "");
-}
-
-function formatFileEditError(error?: string): string {
-  const cleaned = cleanFileEditError(error);
-  if (!cleaned) return "";
-
-  if (/\bpermission denied\b/i.test(cleaned) || /\boperation not permitted\b/i.test(cleaned)) {
-    return "No permission to change this location.";
-  }
-
-  return cleaned
-    .replace(/^old_text not found in (.+)$/i, "Target text was not found in $1.")
-    .replace(/^old_text appears multiple times in (.+)$/i, "Target text matched multiple places in $1.")
-    .replace(/^file to (?:update|delete) does not exist: (.+)$/i, "File does not exist: $1.")
-    .replace(/^path to (?:update|delete) is not a file: (.+)$/i, "Path is not a file: $1.")
-    .slice(0, 180);
+function fileEditAction(edit: FileEditSummary, editing: boolean, failed: boolean): string {
+  const deleting = edit.operation === "delete";
+  if (failed) return deleting ? "Could not delete" : "Could not edit";
+  if (editing) return deleting ? "Deleting" : "Editing";
+  return deleting ? "Deleted" : "Edited";
 }

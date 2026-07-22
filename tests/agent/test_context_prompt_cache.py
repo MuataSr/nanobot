@@ -9,6 +9,7 @@ from importlib.resources import files as pkg_files
 from pathlib import Path
 
 from nanobot.agent.context import ContextBuilder
+from nanobot.runtime_context import RuntimeContextBlock
 
 
 class _FakeDatetime(real_datetime):
@@ -61,34 +62,7 @@ def test_system_prompt_reflects_current_dream_memory_contract(tmp_path) -> None:
     assert "write important facts here" not in prompt
 
 
-def test_runtime_context_is_separate_untrusted_user_message(tmp_path) -> None:
-    """Runtime metadata should be merged with the user message."""
-    workspace = _make_workspace(tmp_path)
-    builder = ContextBuilder(workspace)
-
-    messages = builder.build_messages(
-        history=[],
-        current_message="Return exactly: OK",
-        channel="cli",
-        chat_id="direct",
-    )
-
-    assert messages[0]["role"] == "system"
-    assert "## Current Session" not in messages[0]["content"]
-
-    # Runtime context is now merged with user message into a single message
-    assert messages[-1]["role"] == "user"
-    user_content = messages[-1]["content"]
-    assert isinstance(user_content, str)
-    assert ContextBuilder._RUNTIME_CONTEXT_TAG in user_content
-    assert "Current Time:" in user_content
-    assert "Channel: cli" in user_content
-    assert "Chat ID: direct" in user_content
-    assert "Return exactly: OK" in user_content
-
-
-def test_runtime_context_appended_after_user_content(tmp_path) -> None:
-    """User content must precede runtime context for prompt-cache prefix stability."""
+def test_provider_context_appended_after_user_content(tmp_path) -> None:
     workspace = _make_workspace(tmp_path)
     builder = ContextBuilder(workspace)
 
@@ -97,48 +71,15 @@ def test_runtime_context_appended_after_user_content(tmp_path) -> None:
         current_message="hello world",
         channel="cli",
         chat_id="direct",
+        runtime_context_blocks=[
+            RuntimeContextBlock(source="test", content="provider context"),
+        ],
     )
 
     content = messages[-1]["content"]
     user_pos = content.find("hello world")
-    tag_pos = content.find(ContextBuilder._RUNTIME_CONTEXT_TAG)
-    assert user_pos < tag_pos, "user content must precede runtime context for prefix stability"
-
-
-def test_runtime_context_includes_sender_id_when_provided(tmp_path) -> None:
-    """Sender ID should be included in runtime context when provided."""
-    workspace = _make_workspace(tmp_path)
-    builder = ContextBuilder(workspace)
-
-    messages = builder.build_messages(
-        history=[],
-        current_message="Return exactly: OK",
-        channel="cli",
-        chat_id="direct",
-        sender_id="user-12345",
-    )
-
-    user_content = messages[-1]["content"]
-    assert isinstance(user_content, str)
-    assert "Sender ID: user-12345" in user_content
-
-
-def test_runtime_context_excludes_sender_id_when_not_provided(tmp_path) -> None:
-    """Sender ID should not be present in runtime context when not provided."""
-    workspace = _make_workspace(tmp_path)
-    builder = ContextBuilder(workspace)
-
-    messages = builder.build_messages(
-        history=[],
-        current_message="Return exactly: OK",
-        channel="cli",
-        chat_id="direct",
-        sender_id=None,
-    )
-
-    user_content = messages[-1]["content"]
-    assert isinstance(user_content, str)
-    assert "Sender ID:" not in user_content
+    context_pos = content.find("provider context")
+    assert user_pos < context_pos, "user content must precede provider context"
 
 
 def test_unprocessed_history_injected_into_system_prompt(tmp_path) -> None:
@@ -391,22 +332,33 @@ def test_subagent_result_does_not_create_consecutive_assistant_messages(tmp_path
         assert not (left.get("role") == right.get("role") == "assistant")
 
 
-def test_always_skills_excluded_from_skills_index(tmp_path) -> None:
-    """Always skills should appear in Active Skills but NOT in the skills index."""
+def test_memory_skill_is_lazy_loaded_from_skills_index(tmp_path) -> None:
+    """Memory search guidance should be discoverable without loading its full body."""
     workspace = _make_workspace(tmp_path)
     builder = ContextBuilder(workspace)
 
     prompt = builder.build_system_prompt()
 
-    # memory skill should be in Active Skills section
-    assert "# Active Skills" in prompt
-    assert "### Skill: memory" in prompt
+    assert "### Skill: memory" not in prompt
+    assert "**memory**" in prompt
+    assert "Search Past Events" not in prompt
+    assert "Examples (replace `keyword`)" not in prompt
 
-    # memory skill should NOT appear in the skills index
-    skills_section = prompt.split("# Skills\n", 1)
-    if len(skills_section) > 1:
-        index_text = skills_section[1].split("\n\n---")[0]
-        assert "**memory**" not in index_text
+
+def test_fresh_workspace_omits_default_prompt_scaffolding(tmp_path) -> None:
+    from nanobot.utils.helpers import sync_workspace_templates
+
+    workspace = _make_workspace(tmp_path)
+    sync_workspace_templates(workspace, silent=True)
+
+    prompt = ContextBuilder(workspace).build_system_prompt()
+
+    assert "## AGENTS.md" not in prompt
+    assert "## USER.md" not in prompt
+    assert "8281248569" not in prompt
+    assert "(your name)" not in prompt
+    assert "apt/brew" not in prompt
+    assert prompt.count("Do not use the 'message' tool for normal replies") == 1
 
 
 def test_template_memory_md_is_skipped(tmp_path) -> None:
@@ -418,10 +370,7 @@ def test_template_memory_md_is_skipped(tmp_path) -> None:
     builder = ContextBuilder(workspace)
     prompt = builder.build_system_prompt()
 
-    # The "# Memory\n\n## Long-term Memory" block is produced only by
-    # build_system_prompt() when MEMORY.md is injected.  The memory skill
-    # also contains "# Memory" but is followed by "## Structure", not
-    # "## Long-term Memory".
+    # This block is produced only when populated long-term memory is injected.
     assert "# Memory\n\n## Long-term Memory" not in prompt
     assert "This file is automatically updated by nanobot" not in prompt
 

@@ -12,6 +12,7 @@ from nanobot.session.manager import Session, SessionManager
 
 if TYPE_CHECKING:
     from nanobot.agent.memory import Consolidator
+    from nanobot.utils.llm_runtime import LLMRuntime
 
 
 class AutoCompact:
@@ -35,6 +36,26 @@ class AutoCompact:
             ts = datetime.fromisoformat(ts)
         return ((now or datetime.now()) - ts).total_seconds() >= self._ttl * 60
 
+    def _has_compactable_idle_tail(self, key: str) -> bool:
+        session = self.sessions.get_or_create(key)
+        tail = list(session.messages[session.last_consolidated:])
+        if not tail:
+            return False
+        probe = Session(
+            key=session.key,
+            messages=tail,
+            created_at=session.created_at,
+            updated_at=session.updated_at,
+            metadata={},
+            last_consolidated=0,
+        )
+        result = probe.retain_recent_legal_suffix(
+            self._RECENT_SUFFIX_MESSAGES,
+            extend_to_user=True,
+        )
+        messages_to_remove = result.dropped[result.already_consolidated_count:]
+        return bool(messages_to_remove)
+
     @staticmethod
     def _format_summary(text: str, last_active: datetime) -> str:
         return f"Previous conversation summary (last active {last_active.isoformat()}):\n{text}"
@@ -43,37 +64,12 @@ class AutoCompact:
     def _is_internal_session(cls, key: str) -> bool:
         return key.startswith(cls._INTERNAL_SESSION_PREFIXES)
 
-    def _estimate_tokens(self, session: Session) -> int:
-        """Rough token estimate: chars / 4 for English text."""
-        total_chars = sum(
-            len(msg.get("content", "")) if isinstance(msg.get("content"), str) else 0
-            for msg in session.messages
-        )
-        return total_chars // 4
-
-    def _split_unconsolidated(
-        self, session: Session,
-    ) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
-        """Split live session tail into archiveable prefix and retained recent suffix."""
-        tail = list(session.messages[session.last_consolidated:])
-        if not tail:
-            return [], []
-
-        probe = Session(
-            key=session.key,
-            messages=tail.copy(),
-            created_at=session.created_at,
-            updated_at=session.updated_at,
-            metadata={},
-            last_consolidated=0,
-        )
-        probe.retain_recent_legal_suffix(self._RECENT_SUFFIX_MESSAGES)
-        kept = probe.messages
-        cut = len(tail) - len(kept)
-        return tail[:cut], kept
-
-    def check_expired(self, schedule_background: Callable[[Coroutine], None],
-                      active_session_keys: Collection[str] = ()) -> None:
+    def check_expired(
+        self,
+        schedule_background: Callable[[Coroutine], None],
+        resolve_runtime: Callable[[], LLMRuntime],
+        active_session_keys: Collection[str] = (),
+    ) -> None:
         """Schedule archival for idle sessions, skipping those with in-flight agent tasks."""
         now = datetime.now()
         for info in self.sessions.list_sessions():
@@ -82,24 +78,21 @@ class AutoCompact:
                 continue
             if key in active_session_keys:
                 continue
-            session = self.sessions.get_or_create(key)
-            token_est = self._estimate_tokens(session)
-            ttl_expired = self._is_expired(info.get("updated_at"), now)
-            token_exceeded = (
-                self._token_threshold > 0
-                and token_est >= self._token_threshold
-            )
-            if ttl_expired or token_exceeded:
+            updated_at = info.get("updated_at")
+            if self._is_expired(updated_at, now) and self._has_compactable_idle_tail(key):
+                runtime = resolve_runtime()
                 self._archiving.add(key)
-                schedule_background(self._archive(key))
+                schedule_background(self._archive(key, runtime=runtime))
 
-    async def _archive(self, key: str) -> None:
+    async def _archive(self, key: str, *, runtime: LLMRuntime) -> None:
         if self._is_internal_session(key):
             self._archiving.discard(key)
             return
         try:
             summary = await self.consolidator.compact_idle_session(
-                key, self._RECENT_SUFFIX_MESSAGES,
+                key,
+                runtime=runtime,
+                max_suffix=self._RECENT_SUFFIX_MESSAGES,
             )
             if summary and summary != "(nothing)":
                 session = self.sessions.get_or_create(key)

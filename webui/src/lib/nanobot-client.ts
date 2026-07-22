@@ -3,7 +3,6 @@ import type {
   InboundEvent,
   Outbound,
   OutboundCliAppMention,
-  OutboundImageGeneration,
   OutboundMcpPresetMention,
   OutboundMedia,
   GoalStateWsPayload,
@@ -82,8 +81,8 @@ type RunStatusHandler = (chatId: string, startedAt: number | null) => void;
  */
 export type StreamError =
   /** Server rejected the inbound frame as too large (WS close code 1009).
-   * Typically means the user attached images whose base64 size exceeded
-   * ``maxMessageBytes`` on the server. */
+   * This is the transport fallback after text and attachment policies have
+   * already been checked independently. */
   | { kind: "message_too_big" }
   | { kind: "workspace_scope_rejected"; reason?: string; chatId?: string };
 
@@ -385,9 +384,9 @@ export class NanobotClient {
     content: string,
     media?: OutboundMedia[],
     options?: {
-      imageGeneration?: OutboundImageGeneration;
       cliApps?: OutboundCliAppMention[];
       mcpPresets?: OutboundMcpPresetMention[];
+      quotedContext?: string;
       workspaceScope?: WorkspaceScopePayload | null;
       turnId?: string;
     },
@@ -398,9 +397,9 @@ export class NanobotClient {
       chat_id: chatId,
       content,
       ...(media && media.length > 0 ? { media } : {}),
-      ...(options?.imageGeneration ? { image_generation: options.imageGeneration } : {}),
       ...(options?.cliApps?.length ? { cli_apps: options.cliApps } : {}),
       ...(options?.mcpPresets?.length ? { mcp_presets: options.mcpPresets } : {}),
+      ...(options?.quotedContext?.trim() ? { quoted_context: options.quotedContext.trim() } : {}),
       ...(options?.workspaceScope ? { workspace_scope: options.workspaceScope } : {}),
       ...(options?.turnId ? { turn_id: options.turnId } : {}),
       webui: true,
@@ -423,6 +422,13 @@ export class NanobotClient {
     if (this.status_ === status) return;
     this.status_ = status;
     for (const handler of this.statusHandlers) handler(status);
+  }
+
+  private clearRunStatusesForReconnect(): void {
+    if (this.runStartedAtByChatId.size === 0) return;
+    const chatIds = [...this.runStartedAtByChatId.keys()];
+    this.runStartedAtByChatId.clear();
+    for (const chatId of chatIds) this.emitRunStatus(chatId, null);
   }
 
   private handleOpen(): void {
@@ -629,6 +635,7 @@ export class NanobotClient {
   }
 
   private scheduleReconnect(): void {
+    this.clearRunStatusesForReconnect();
     this.setStatus("reconnecting");
     const attempt = this.reconnectAttempts++;
     // Exponential backoff: 0.5s, 1s, 2s, 4s, capped.
