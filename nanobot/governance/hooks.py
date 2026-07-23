@@ -21,22 +21,19 @@ allow everything else). If governance is not in enabled_hooks, zero overhead.
 
 from __future__ import annotations
 
-import asyncio
 from typing import Any
 
+import yaml
 from loguru import logger
 
 from nanobot.agent.hook import (
-    AgentHook,
     ConfigurableHook,
     HookRegistry,
     ToolCallContext,
 )
-import yaml as _yaml  # noqa: F401 — needed for except clause
-
-from nanobot.governance.permissions import GovernanceDenied, PermissionEngine
-from nanobot.governance.constitution import Constitution
 from nanobot.governance.audit import AuditLogger
+from nanobot.governance.constitution import Constitution
+from nanobot.governance.permissions import GovernanceDenied, PermissionEngine
 from nanobot.governance.risk import GovernanceAction
 
 

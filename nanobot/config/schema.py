@@ -173,7 +173,9 @@ class AgentDefaults(Base):
 
     @field_validator("timezone")
     @classmethod
-    def validate_timezone(cls, value: str) -> str:
+    def validate_timezone(cls, value: str | None) -> str | None:
+        if value is None:
+            return None
         from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
         try:

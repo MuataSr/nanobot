@@ -38,7 +38,6 @@ from nanobot.governance.risk import (
     RiskLevel,
 )
 
-
 # ── Shared evaluation context passed through the rule chain ────────
 
 
@@ -318,7 +317,7 @@ def _extract_path(arguments: dict[str, Any]) -> str:
 # ── Exception ──────────────────────────────────────────────────────
 
 
-class GovernanceDenied(Exception):
+class GovernanceDenied(Exception):  # noqa: N818
     """Raised when a tool call is blocked by governance.
 
     The runner catches this and returns the denial reason to the model

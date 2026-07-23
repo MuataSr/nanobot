@@ -20,7 +20,6 @@ import yaml
 from loguru import logger
 from pydantic import BaseModel, Field
 
-
 # ---------------------------------------------------------------------------
 # Pydantic models for constitution.yaml structure
 # ---------------------------------------------------------------------------
@@ -204,7 +203,7 @@ class Constitution(BaseModel):
         except (OSError, yaml.YAMLError, ValueError) as exc:
             logger.error("Failed to load constitution from {}: {} — using defaults", path, exc)
             return cls.default()
-        except Exception as exc:
+        except Exception:
             logger.exception("Unexpected error loading constitution from {}", path)
             raise
 

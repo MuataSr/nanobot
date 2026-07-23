@@ -33,7 +33,6 @@ from loguru import logger
 from nanobot.agent.hook import AgentHook, AgentHookContext
 from nanobot.providers.base import ToolCallRequest
 
-
 # ── Signature helpers ─────────────────────────────────────────────────
 
 def _canonical_signature(calls: list[ToolCallRequest]) -> str:

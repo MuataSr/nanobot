@@ -315,6 +315,53 @@ class SDKCaptureHook(AgentHook):
         self.tool_events = list(context.tool_events)
         self.had_injections = context.had_injections
 
+
+class ConfigurableHook(AgentHook):
+    """Base class for hooks that accept config from config.json.
+
+    Subclass this to create config-driven hooks. Override ``__init__`` to accept
+    a ``config: dict[str, Any]`` parameter alongside the standard hook args.
+    """
+
+    def __init__(self, config: dict[str, Any] | None = None, **kwargs: Any) -> None:
+        super().__init__(**kwargs)
+        self.config = config or {}
+
+
+class HookRegistry:
+    """Registry for named hooks, loaded from config and composed at startup."""
+
+    _registry: dict[str, type[ConfigurableHook]] = {}
+
+    @classmethod
+    def register(cls, name: str) -> Callable[[type[ConfigurableHook]], type[ConfigurableHook]]:
+        """Decorator to register a ConfigurableHook subclass under a name."""
+        def decorator(hook_cls: type[ConfigurableHook]) -> type[ConfigurableHook]:
+            cls._registry[name] = hook_cls
+            return hook_cls
+        return decorator
+
+    @classmethod
+    def build(cls, enabled: list[str], config: dict[str, Any]) -> AgentHook | None:
+        """Build a CompositeHook from enabled hook names + config dict.
+
+        Returns None if no enabled hooks resolve to registered classes.
+        """
+        hooks: list[AgentHook] = []
+        for name in enabled:
+            hook_cls = cls._registry.get(name)
+            if hook_cls is None:
+                logger.warning("Hook '{}' not found in registry — skipping", name)
+                continue
+            hook_cfg = config.get(name, {})
+            hooks.append(hook_cls(config=hook_cfg))
+        if not hooks:
+            return None
+        if len(hooks) == 1:
+            return hooks[0]
+        return CompositeHook(hooks)
+
+
 @dataclass
 class ToolCallContext:
     """Context for a single tool call passed to hooks."""

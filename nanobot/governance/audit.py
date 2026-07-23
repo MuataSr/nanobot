@@ -9,15 +9,13 @@ Append-only log with:
 
 from __future__ import annotations
 
-import json
-import os
 import hashlib
+import json
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
 from loguru import logger
-
 
 # Default audit log location
 _DEFAULT_AUDIT_PATH = Path.home() / ".nanobot" / "audit.jsonl"

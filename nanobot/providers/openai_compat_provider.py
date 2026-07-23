@@ -36,9 +36,6 @@ from nanobot.providers.openai_responses import (
     parse_response_output,
 )
 
-
-
-
 if TYPE_CHECKING:
     from openai import AsyncOpenAI as AsyncOpenAIType
 

@@ -14,13 +14,11 @@ from pathlib import Path
 # Ensure the nanobot package is importable
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-from nanobot.governance.constitution import Constitution
-from nanobot.governance.permissions import PermissionEngine, GovernanceDecision
-from nanobot.governance.risk import GovernanceAction as Action, RiskLevel
 from nanobot.governance.audit import AuditLogger
-from nanobot.governance.risk import _tool_family
-from nanobot.governance.constitution import ToolPermission
-
+from nanobot.governance.constitution import Constitution, ToolPermission
+from nanobot.governance.permissions import PermissionEngine
+from nanobot.governance.risk import GovernanceAction as Action
+from nanobot.governance.risk import RiskLevel, _tool_family
 
 # ── Test helpers ──────────────────────────────────────────────
 
@@ -228,13 +226,13 @@ print(f"Results: {_passed} passed, {_failed} failed")
 
 print("\n[Test 8] Rule chain is composable and independently testable")
 
-from nanobot.governance.permissions import (
-    ConstitutionDenyRule,
-    RiskThresholdRule,
+from nanobot.governance.permissions import (  # noqa: E402
     ConstitutionAllowRule,
+    ConstitutionDenyRule,
     PolicyLockedRule,
     PolicyOpenRule,
     PolicyRestrictedRule,
+    RiskThresholdRule,
     UnknownToolRule,
     _EvalContext,
 )
@@ -303,7 +301,8 @@ _assert(
 )
 
 # Test UnknownToolRule in isolation: always returns a decision (never None)
-from nanobot.governance.constitution import Constitution as C2
+from nanobot.governance.constitution import Constitution as C2  # noqa: E402, N814
+
 unknown_ctx = _EvalContext(
     tool_name="mystery",
     norm_tool="mystery",
