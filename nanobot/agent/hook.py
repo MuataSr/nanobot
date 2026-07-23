@@ -139,6 +139,14 @@ class AgentHook:
     def finalize_content(self, context: AgentHookContext, content: str | None) -> str | None:
         return content
 
+    async def after_tool_call(
+        self,
+        tc_ctx: ToolCallContext,
+        result: Any,
+    ) -> Any:
+        """Post-execution hook for a single tool call."""
+        return result
+
 
 AgentTurnHookFactory = Callable[[AgentTurnHookContext], AgentHook | None]
 
@@ -252,6 +260,22 @@ class CompositeHook(AgentHook):
             content = h.finalize_content(context, content)
         return content
 
+    async def after_tool_call(
+        self,
+        tc_ctx: ToolCallContext,
+        result: Any,
+    ) -> Any:
+        """Post-execution hook for a single tool call.
+
+        Can inspect or modify the result before it is returned to the model.
+        """
+        for h in self._hooks:
+            try:
+                result = await h.after_tool_call(tc_ctx, result)
+            except Exception:
+                logger.exception("AgentHook.after_tool_call error in {}", type(h).__name__)
+        return result
+
 
 class SDKCaptureHook(AgentHook):
     """Record tool names and the final message list for ``RunResult``.
@@ -290,3 +314,12 @@ class SDKCaptureHook(AgentHook):
         self.error = context.error
         self.tool_events = list(context.tool_events)
         self.had_injections = context.had_injections
+
+@dataclass
+class ToolCallContext:
+    """Context for a single tool call passed to hooks."""
+
+    tool_name: str
+    arguments: dict[str, Any] | str | None = None
+
+

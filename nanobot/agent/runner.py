@@ -17,7 +17,7 @@ from nanobot.agent.context_governance import (
     ContextGovernanceConfig,
     ContextGovernor,
 )
-from nanobot.agent.hook import AgentHook, AgentHookContext, AgentRunHookContext
+from nanobot.agent.hook import AgentHook, AgentHookContext, AgentRunHookContext, ToolCallContext
 from nanobot.agent.tools.registry import ToolRegistry, is_tool_error_result
 from nanobot.providers.base import LLMProvider, LLMResponse, ToolCallRequest
 from nanobot.session.history_visibility import is_hidden_history_message

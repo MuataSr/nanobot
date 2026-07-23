@@ -99,7 +99,7 @@ class CronTool(Tool):
 
     def _display_timezone(self, schedule: CronSchedule) -> str:
         """Pick the most human-meaningful timezone for display."""
-        return schedule.tz or self._default_timezone
+        return schedule.tz or self._default_timezone or "UTC"
 
     @staticmethod
     def _format_timestamp(ms: int, tz_name: str) -> str:
