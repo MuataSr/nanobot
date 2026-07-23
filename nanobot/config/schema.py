@@ -150,7 +150,7 @@ class AgentDefaults(Base):
         serialization_alias="toolHintMaxLength",
     )  # Max characters for tool hint display (e.g. "$ cd …/project && npm test")
     reasoning_effort: str | None = None  # low / medium / high / adaptive / none — LLM thinking effort; None preserves the provider default
-    timezone: str | None = None  # IANA timezone, e.g. "America/New_York"; None = system local time
+    timezone: str = "UTC"  # IANA timezone, e.g. "Asia/Shanghai", "America/New_York"
     bot_name: str = "nanobot"  # Display name shown in CLI prompts (e.g. "{name} is thinking...")
     bot_icon: str = "🐈"  # Short icon (emoji or text) shown next to the bot name in CLI; "" to omit
     unified_session: bool = False  # Share one session across all channels (single-user multi-device)
@@ -173,9 +173,7 @@ class AgentDefaults(Base):
 
     @field_validator("timezone")
     @classmethod
-    def validate_timezone(cls, value: str | None) -> str | None:
-        if value is None:
-            return None
+    def validate_timezone(cls, value: str) -> str:
         from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
         try:
